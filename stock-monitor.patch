@@ -1,0 +1,1808 @@
+diff --git a/.env.example b/.env.example
+index 40bb13b..0d7dd99 100644
+--- a/.env.example
++++ b/.env.example
+@@ -63,3 +63,45 @@ AWS_BUCKET=
+ AWS_USE_PATH_STYLE_ENDPOINT=false
+ 
+ VITE_APP_NAME="${APP_NAME}"
++
++# --------------------------------------------------------------------------
++# Stock monitor
++# --------------------------------------------------------------------------
++
++MONITOR_MASTER_SOURCE=onlinefact
++MONITOR_BATCH_QUEUE=monitor
++
++# Onlinefact ERP — https://admin.onlinefact.be > Configuration > API
++ONLINEFACT_API_URL=https://api.onlinefact.be
++ONLINEFACT_API_KEY=
++ONLINEFACT_API_SECRET=
++
++# WooCommerce — Woocommerce > Settings > Advanced > REST API (read permission is enough)
++WOOCOMMERCE_DEKOOKWINKEL_URL=https://dekookwinkel.be
++WOOCOMMERCE_DEKOOKWINKEL_KEY=
++WOOCOMMERCE_DEKOOKWINKEL_SECRET=
++
++WOOCOMMERCE_KORALY_URL=https://koralybv.com
++WOOCOMMERCE_KORALY_KEY=
++WOOCOMMERCE_KORALY_SECRET=
++
++WOOCOMMERCE_OUTLET_ELEKTRO_URL=https://outlet-elektro.be
++WOOCOMMERCE_OUTLET_ELEKTRO_KEY=
++WOOCOMMERCE_OUTLET_ELEKTRO_SECRET=
++
++# Bol.com Retailer API — one client id/secret per seller account (Mijn account > Instellingen > API)
++BOL_AUTH_URL=https://login.bol.com/token
++BOL_API_URL=https://api.bol.com/retailer
++BOL_ACCEPT_HEADER=application/vnd.retailer.v10+json
++
++BOL_KORALY_BE_CLIENT_ID=
++BOL_KORALY_BE_CLIENT_SECRET=
++
++BOL_KORALY_NL_CLIENT_ID=
++BOL_KORALY_NL_CLIENT_SECRET=
++
++BOL_OUTLET_ELEKTRO_BE_CLIENT_ID=
++BOL_OUTLET_ELEKTRO_BE_CLIENT_SECRET=
++
++BOL_OUTLET_ELEKTRO_NL_CLIENT_ID=
++BOL_OUTLET_ELEKTRO_NL_CLIENT_SECRET=
+diff --git a/STOCK_MONITOR.md b/STOCK_MONITOR.md
+new file mode 100644
+index 0000000..082a451
+--- /dev/null
++++ b/STOCK_MONITOR.md
+@@ -0,0 +1,105 @@
++# Stock monitor
++
++This adds two pages to the app:
++
++- **EAN lookup** (`/stock/lookup`) — enter one EAN, see stock across every source, side by side.
++- **Batch comparison** (`/stock/batch`) — launch a run over all ERP EANs (or a pasted list) and watch
++  results stream in live while a queue worker processes them.
++
++## What was added
++
++```
++config/monitor.php                          # source registry, master source, batch settings
++app/Services/Stock/
++  DTO/StockResult.php                        # value object returned by every client
++  Contracts/StockSourceClient.php            # interface every client implements
++  Clients/OnlinefactClient.php                # ERP (master)
++  Clients/WooCommerceClient.php               # one instance per WooCommerce shop
++  Clients/BolComClient.php                    # one instance per bol.com seller account
++  SourceRegistry.php                          # builds clients from config/monitor.php
++  StockAggregatorService.php                  # checks one EAN across all sources
++  BatchRunSeeder.php                          # seeds a BatchRun with EANs + dispatches jobs
++app/Jobs/
++  CheckEanStockJob.php                        # checks one EAN, updates the batch run row
++  SeedBatchRunFromErpJob.php                  # pulls all EANs from Onlinefact, then seeds
++app/Models/BatchRun.php, BatchRunItem.php
++app/Livewire/Stock/EanLookup.php + view
++app/Livewire/Stock/BatchRunPage.php + view
++database/migrations/..._create_batch_runs_table.php
++database/migrations/..._create_batch_run_items_table.php
++routes/web.php                                # stock.lookup / stock.batch routes
++resources/views/layouts/app/sidebar.blade.php # nav links added
++resources/css/app.css                         # TallStackUI vendor views added to @source
++composer.json                                 # tallstackui/tallstackui added
++.env.example                                  # all the credentials below
++```
++
++## Install (run these locally, where PHP/Composer/Node are available)
++
++```bash
++composer install
++php artisan tallstackui:install      # publishes TallStackUI assets/config, wires the Vite entry
++cp .env.example .env                 # if you don't already have one
++php artisan key:generate
++```
++
++Fill in `.env` — every source is optional; a source with blank credentials just shows up as
++"error: missing credentials" instead of breaking the page:
++
++| Variable | Where to get it |
++|---|---|
++| `ONLINEFACT_API_KEY` / `ONLINEFACT_API_SECRET` | `admin.onlinefact.be` → Configuration → API |
++| `WOOCOMMERCE_*_KEY` / `WOOCOMMERCE_*_SECRET` | Each shop's wp-admin → WooCommerce → Settings → Advanced → REST API. **Read** permission is enough. |
++| `BOL_*_CLIENT_ID` / `BOL_*_CLIENT_SECRET` | Each bol.com seller account → Instellingen → API (one client id/secret per KORALY BV BE/NL and Exellent Electro Riemst BE/NL account) |
++
++Then:
++
++```bash
++php artisan migrate
++npm install
++npm run build      # or `npm run dev` while developing
++php artisan serve
++```
++
++**A queue worker is required** for the batch page to actually process anything (the "database"
++queue driver is already configured in `.env.example`):
++
++```bash
++php artisan queue:work --queue=monitor
++```
++
++Run more than one `queue:work` process (or `--tries` / Horizon / Supervisor in production) if you
++want EANs checked concurrently — jobs are dispatched one per EAN, so worker count = concurrency.
++
++## Design notes / things worth knowing
++
++- **Master source**: `MONITOR_MASTER_SOURCE=onlinefact` (config/monitor.php). Every other source's
++  `diff` is `source_stock - erp_stock`. Positive = channel shows more than you actually have
++  (overselling risk); negative = channel shows less than you actually have (missed sales).
++- **WooCommerce EAN matching**: looks up the native `global_unique_id` field (WooCommerce ≥ 9.2's
++  GTIN/UPC/EAN/ISBN field) first, and falls back to matching the EAN against the product **SKU** if
++  nothing is found. If your shops store EANs differently (a custom meta field from an EAN plugin,
++  for instance), adjust `WooCommerceClient::findByGlobalUniqueId()`/`findBySku()` accordingly.
++- **Bol.com**: each seller account (KORALY BV BE/NL, Exellent Electro Riemst BE/NL) is its own
++  source with its own OAuth2 client id/secret, since bol.com issues credentials per account, not
++  per shop. `GET /retailer/offers?ean=...` returns *your own* offer(s) for that EAN; stock is
++  summed across whatever comes back (normally exactly one offer).
++- **Live batch view**: no websockets/Reverb needed — the page polls the database every 2 seconds
++  (`wire:poll.2s`) while a run is `pending`/`running`, and stops polling once it's `completed`.
++  This keeps setup simple; swap it for Laravel Reverb + broadcasting later if you want push updates.
++- **TallStackUI components**: I used the documented defaults (`x-input`, `x-button`, `x-badge`,
++  `x-card`, `x-select`, `x-textarea`). Component prop names occasionally shift between minor
++  versions — if `tallstackui:install` pulls a slightly newer 4.x than what these views were written
++  against, check `https://tallstackui.com/docs` for any renamed props (`color`/`text` on `x-badge`,
++  `option-value`/`option-label` on `x-select` in particular).
++- **Onlinefact pagination**: `OnlinefactClient::fetchAllEans()` pages through `products.php` using
++  `sinds_id` (product_id ascending). This assumes the API returns results ordered by `product_id`;
++  if your catalogue is large and this turns out not to hold, page by `sinds_date` instead.
++
++## Not built (flag if you want it)
++
++- No admin UI for managing sources — they're config/env only, by design, since credentials belong
++  in `.env` rather than the database.
++- No scheduled/automatic batch runs (e.g. nightly) — trivial to add via `routes/console.php` and
++  `Schedule::call()` dispatching `SeedBatchRunFromErpJob`, once you're happy with the manual flow.
++- No CSV/Excel upload for the batch list, only paste — say the word if you want a file upload too.
+diff --git a/app/Jobs/CheckEanStockJob.php b/app/Jobs/CheckEanStockJob.php
+new file mode 100644
+index 0000000..64be4e0
+--- /dev/null
++++ b/app/Jobs/CheckEanStockJob.php
+@@ -0,0 +1,77 @@
++<?php
++
++namespace App\Jobs;
++
++use App\Models\BatchRun;
++use App\Models\BatchRunItem;
++use App\Services\Stock\StockAggregatorService;
++use Illuminate\Bus\Queueable;
++use Illuminate\Contracts\Queue\ShouldQueue;
++use Illuminate\Foundation\Bus\Dispatchable;
++use Illuminate\Queue\InteractsWithQueue;
++use Illuminate\Queue\SerializesModels;
++use Illuminate\Support\Facades\DB;
++
++class CheckEanStockJob implements ShouldQueue
++{
++    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
++
++    public int $tries = 3;
++
++    public int $backoff = 5;
++
++    public function __construct(
++        public int $batchRunId,
++        public string $ean,
++    ) {
++        $this->onQueue(config('monitor.batch.queue', 'monitor'));
++    }
++
++    public function handle(StockAggregatorService $aggregator): void
++    {
++        $batchRun = BatchRun::find($this->batchRunId);
++
++        // The batch run may have been deleted while this job was queued.
++        if (! $batchRun) {
++            return;
++        }
++
++        $check = $aggregator->check($this->ean);
++
++        $hasError = $check['results']->contains(fn ($r) => ! empty($r['error']));
++        $hasMismatch = $check['results']->contains(fn ($r) => ! $r['is_master'] && $r['found'] && (float) $r['diff'] !== 0.0);
++        $description = $check['results']->firstWhere('is_master', true)['description'] ?? null;
++
++        BatchRunItem::where('batch_run_id', $this->batchRunId)
++            ->where('ean', $this->ean)
++            ->update([
++                'description' => $description,
++                'status' => 'checked',
++                'master_stock' => $check['master_stock'],
++                'has_mismatch' => $hasMismatch,
++                'has_error' => $hasError,
++                'results' => $check['results']->toArray(),
++                'checked_at' => now(),
++            ]);
++
++        DB::table('batch_runs')->where('id', $this->batchRunId)->update([
++            'processed' => DB::raw('processed + 1'),
++            'mismatches' => $hasMismatch ? DB::raw('mismatches + 1') : DB::raw('mismatches'),
++            'errors' => $hasError ? DB::raw('errors + 1') : DB::raw('errors'),
++        ]);
++
++        $this->maybeFinishBatch();
++    }
++
++    protected function maybeFinishBatch(): void
++    {
++        $batchRun = BatchRun::find($this->batchRunId);
++
++        if ($batchRun && $batchRun->processed >= $batchRun->total && $batchRun->status !== 'completed') {
++            $batchRun->update([
++                'status' => 'completed',
++                'finished_at' => now(),
++            ]);
++        }
++    }
++}
+diff --git a/app/Jobs/SeedBatchRunFromErpJob.php b/app/Jobs/SeedBatchRunFromErpJob.php
+new file mode 100644
+index 0000000..ff337f8
+--- /dev/null
++++ b/app/Jobs/SeedBatchRunFromErpJob.php
+@@ -0,0 +1,37 @@
++<?php
++
++namespace App\Jobs;
++
++use App\Models\BatchRun;
++use App\Services\Stock\BatchRunSeeder;
++use App\Services\Stock\SourceRegistry;
++use Illuminate\Bus\Queueable;
++use Illuminate\Contracts\Queue\ShouldQueue;
++use Illuminate\Foundation\Bus\Dispatchable;
++use Illuminate\Queue\InteractsWithQueue;
++use Illuminate\Queue\SerializesModels;
++
++class SeedBatchRunFromErpJob implements ShouldQueue
++{
++    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
++
++    public function __construct(
++        public int $batchRunId,
++    ) {
++        $this->onQueue(config('monitor.batch.queue', 'monitor'));
++    }
++
++    public function handle(SourceRegistry $sources): void
++    {
++        $batchRun = BatchRun::find($this->batchRunId);
++
++        if (! $batchRun) {
++            return;
++        }
++
++        $erp = $sources->master();
++        $eans = method_exists($erp, 'fetchAllEans') ? $erp->fetchAllEans() : [];
++
++        BatchRunSeeder::seed($batchRun, $eans);
++    }
++}
+diff --git a/app/Livewire/Stock/BatchRunPage.php b/app/Livewire/Stock/BatchRunPage.php
+new file mode 100644
+index 0000000..c707cec
+--- /dev/null
++++ b/app/Livewire/Stock/BatchRunPage.php
+@@ -0,0 +1,112 @@
++<?php
++
++namespace App\Livewire\Stock;
++
++use App\Jobs\SeedBatchRunFromErpJob;
++use App\Models\BatchRun;
++use App\Services\Stock\BatchRunSeeder;
++use App\Services\Stock\SourceRegistry;
++use Livewire\Attributes\Computed;
++use Livewire\Attributes\Title;
++use Livewire\Attributes\Url;
++use Livewire\Component;
++use Livewire\WithPagination;
++
++#[Title('Batch stock comparison')]
++class BatchRunPage extends Component
++{
++    use WithPagination;
++
++    #[Url]
++    public ?int $batchRunId = null;
++
++    public string $eanSource = 'erp'; // erp, paste
++
++    public string $pastedEans = '';
++
++    public string $filter = 'all'; // all, mismatches, errors, pending
++
++    public function mount(): void
++    {
++        if (! $this->batchRunId) {
++            $this->batchRunId = BatchRun::query()->latest()->value('id');
++        }
++    }
++
++    public function startFromErp(): void
++    {
++        $batchRun = BatchRun::create([
++            'user_id' => auth()->id(),
++            'status' => 'pending',
++            'source' => 'erp',
++        ]);
++
++        SeedBatchRunFromErpJob::dispatch($batchRun->id);
++
++        $this->batchRunId = $batchRun->id;
++        $this->filter = 'all';
++    }
++
++    public function startFromPaste(): void
++    {
++        $this->validate([
++            'pastedEans' => ['required', 'string'],
++        ]);
++
++        $eans = collect(preg_split('/[\s,;]+/', $this->pastedEans))
++            ->map(fn ($ean) => trim($ean))
++            ->filter()
++            ->values()
++            ->all();
++
++        $batchRun = BatchRun::create([
++            'user_id' => auth()->id(),
++            'status' => 'pending',
++            'source' => 'paste',
++        ]);
++
++        BatchRunSeeder::seed($batchRun, $eans);
++
++        $this->batchRunId = $batchRun->id;
++        $this->pastedEans = '';
++        $this->filter = 'all';
++    }
++
++    #[Computed]
++    public function batchRun(): ?BatchRun
++    {
++        return $this->batchRunId ? BatchRun::find($this->batchRunId) : null;
++    }
++
++    #[Computed]
++    public function recentRuns()
++    {
++        return BatchRun::query()->latest()->limit(10)->get();
++    }
++
++    #[Computed]
++    public function isLive(): bool
++    {
++        return $this->batchRun && in_array($this->batchRun->status, ['pending', 'running'], true);
++    }
++
++    public function render(SourceRegistry $sources)
++    {
++        $items = null;
++
++        if ($this->batchRun) {
++            $items = $this->batchRun->items()
++                ->when($this->filter === 'mismatches', fn ($q) => $q->where('has_mismatch', true))
++                ->when($this->filter === 'errors', fn ($q) => $q->where('has_error', true))
++                ->when($this->filter === 'pending', fn ($q) => $q->where('status', 'pending'))
++                ->orderByDesc('has_mismatch')
++                ->orderBy('ean')
++                ->paginate(25);
++        }
++
++        return view('livewire.stock.batch-run-page', [
++            'items' => $items,
++            'sourceMeta' => $sources->meta(),
++        ]);
++    }
++}
+diff --git a/app/Livewire/Stock/EanLookup.php b/app/Livewire/Stock/EanLookup.php
+new file mode 100644
+index 0000000..4e57197
+--- /dev/null
++++ b/app/Livewire/Stock/EanLookup.php
+@@ -0,0 +1,50 @@
++<?php
++
++namespace App\Livewire\Stock;
++
++use App\Services\Stock\SourceRegistry;
++use App\Services\Stock\StockAggregatorService;
++use Livewire\Attributes\Title;
++use Livewire\Component;
++
++#[Title('EAN stock lookup')]
++class EanLookup extends Component
++{
++    public string $ean = '';
++
++    public ?array $check = null;
++
++    public bool $searching = false;
++
++    public function updatedEan(): void
++    {
++        $this->check = null;
++    }
++
++    public function lookup(StockAggregatorService $aggregator): void
++    {
++        $this->validate([
++            'ean' => ['required', 'string', 'min:6', 'max:32'],
++        ]);
++
++        $this->searching = true;
++
++        $result = $aggregator->check($this->ean);
++
++        $this->check = [
++            'ean' => $result['ean'],
++            'master_source' => $result['master_source'],
++            'master_stock' => $result['master_stock'],
++            'results' => $result['results']->toArray(),
++        ];
++
++        $this->searching = false;
++    }
++
++    public function render(SourceRegistry $sources)
++    {
++        return view('livewire.stock.ean-lookup', [
++            'sourceMeta' => $sources->meta(),
++        ]);
++    }
++}
+diff --git a/app/Models/BatchRun.php b/app/Models/BatchRun.php
+new file mode 100644
+index 0000000..07ca085
+--- /dev/null
++++ b/app/Models/BatchRun.php
+@@ -0,0 +1,52 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++use Illuminate\Database\Eloquent\Relations\HasMany;
++
++class BatchRun extends Model
++{
++    use HasFactory;
++
++    protected $fillable = [
++        'user_id',
++        'status',
++        'total',
++        'processed',
++        'mismatches',
++        'errors',
++        'source',
++        'started_at',
++        'finished_at',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'started_at' => 'datetime',
++            'finished_at' => 'datetime',
++        ];
++    }
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function items(): HasMany
++    {
++        return $this->hasMany(BatchRunItem::class);
++    }
++
++    public function progressPercentage(): int
++    {
++        if ($this->total === 0) {
++            return 0;
++        }
++
++        return (int) round(($this->processed / $this->total) * 100);
++    }
++}
+diff --git a/app/Models/BatchRunItem.php b/app/Models/BatchRunItem.php
+new file mode 100644
+index 0000000..f792c8c
+--- /dev/null
++++ b/app/Models/BatchRunItem.php
+@@ -0,0 +1,40 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class BatchRunItem extends Model
++{
++    use HasFactory;
++
++    protected $fillable = [
++        'batch_run_id',
++        'ean',
++        'description',
++        'status',
++        'master_stock',
++        'has_mismatch',
++        'has_error',
++        'results',
++        'checked_at',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'results' => 'array',
++            'has_mismatch' => 'boolean',
++            'has_error' => 'boolean',
++            'master_stock' => 'float',
++            'checked_at' => 'datetime',
++        ];
++    }
++
++    public function batchRun(): BelongsTo
++    {
++        return $this->belongsTo(BatchRun::class);
++    }
++}
+diff --git a/app/Services/Stock/BatchRunSeeder.php b/app/Services/Stock/BatchRunSeeder.php
+new file mode 100644
+index 0000000..5cf8529
+--- /dev/null
++++ b/app/Services/Stock/BatchRunSeeder.php
+@@ -0,0 +1,56 @@
++<?php
++
++namespace App\Services\Stock;
++
++use App\Jobs\CheckEanStockJob;
++use App\Models\BatchRun;
++use App\Models\BatchRunItem;
++use Illuminate\Support\Carbon;
++
++class BatchRunSeeder
++{
++    /**
++     * Create the pending item rows for a batch run and dispatch a
++     * CheckEanStockJob for each EAN.
++     *
++     * @param  list<string>  $eans
++     */
++    public static function seed(BatchRun $batchRun, array $eans): void
++    {
++        $eans = array_values(array_unique(array_filter(array_map('trim', $eans))));
++
++        if (empty($eans)) {
++            $batchRun->update([
++                'status' => 'completed',
++                'total' => 0,
++                'finished_at' => now(),
++            ]);
++
++            return;
++        }
++
++        $now = Carbon::now();
++
++        collect($eans)->chunk(500)->each(function ($chunk) use ($batchRun, $now) {
++            $rows = $chunk->map(fn (string $ean) => [
++                'batch_run_id' => $batchRun->id,
++                'ean' => $ean,
++                'status' => 'pending',
++                'created_at' => $now,
++                'updated_at' => $now,
++            ])->all();
++
++            BatchRunItem::upsert($rows, ['batch_run_id', 'ean'], ['status', 'updated_at']);
++        });
++
++        $batchRun->update([
++            'total' => count($eans),
++            'status' => 'running',
++            'started_at' => $now,
++        ]);
++
++        foreach ($eans as $ean) {
++            CheckEanStockJob::dispatch($batchRun->id, $ean);
++        }
++    }
++}
+diff --git a/app/Services/Stock/Clients/BolComClient.php b/app/Services/Stock/Clients/BolComClient.php
+new file mode 100644
+index 0000000..39d354d
+--- /dev/null
++++ b/app/Services/Stock/Clients/BolComClient.php
+@@ -0,0 +1,139 @@
++<?php
++
++namespace App\Services\Stock\Clients;
++
++use App\Services\Stock\Contracts\StockSourceClient;
++use App\Services\Stock\DTO\StockResult;
++use Illuminate\Support\Facades\Cache;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * Client for a single Bol.com Retailer (seller) account.
++ *
++ * Bol.com has no concept of "your product for this EAN" other than your own
++ * offer(s), so we fetch the retailer's own offers filtered by EAN and sum
++ * the stock across any matching offers (normally exactly one per EAN).
++ *
++ * @see https://api.bol.com/retailer/public/Retailer-API
++ */
++class BolComClient implements StockSourceClient
++{
++    public function __construct(
++        protected string $key,
++        protected string $label,
++        protected string $group,
++        protected ?string $country,
++        protected ?string $clientId,
++        protected ?string $clientSecret,
++        protected string $authUrl,
++        protected string $apiUrl,
++        protected string $accept,
++    ) {}
++
++    public static function make(string $key, array $config): static
++    {
++        return new static(
++            key: $key,
++            label: $config['label'] ?? $key,
++            group: $config['group'] ?? 'Bol.com',
++            country: $config['country'] ?? null,
++            clientId: $config['client_id'] ?? null,
++            clientSecret: $config['client_secret'] ?? null,
++            authUrl: config('monitor.bol.auth_url'),
++            apiUrl: rtrim(config('monitor.bol.api_url'), '/'),
++            accept: config('monitor.bol.accept'),
++        );
++    }
++
++    public function getStock(string $ean): StockResult
++    {
++        $started = microtime(true);
++
++        if (blank($this->clientId) || blank($this->clientSecret)) {
++            return StockResult::failed($this->key, $this->label, $this->group, 'Missing Bol.com API credentials.', $this->country);
++        }
++
++        try {
++            $token = $this->token();
++
++            if (! $token) {
++                return StockResult::failed($this->key, $this->label, $this->group, 'Could not authenticate with Bol.com.', $this->country);
++            }
++
++            $response = Http::withToken($token)
++                ->withHeaders(['Accept' => $this->accept])
++                ->timeout(15)
++                ->get("{$this->apiUrl}/offers", [
++                    'ean' => $ean,
++                ]);
++
++            $tookMs = round((microtime(true) - $started) * 1000, 1);
++
++            if ($response->status() === 404) {
++                return StockResult::notFound($this->key, $this->label, $this->group, $this->country);
++            }
++
++            if (! $response->successful()) {
++                return StockResult::failed($this->key, $this->label, $this->group, "HTTP {$response->status()}", $this->country);
++            }
++
++            $offers = $response->json('offers', []);
++
++            if (empty($offers)) {
++                return StockResult::notFound($this->key, $this->label, $this->group, $this->country);
++            }
++
++            $stock = collect($offers)->sum(fn ($offer) => (float) ($offer['stock']['amount'] ?? 0));
++            $price = collect($offers)->first()['pricing']['bundlePrices'][0]['unitPrice'] ?? null;
++
++            return new StockResult(
++                sourceKey: $this->key,
++                sourceLabel: $this->label,
++                group: $this->group,
++                country: $this->country,
++                found: true,
++                description: null,
++                sku: $offers[0]['reference'] ?? null,
++                stock: $stock,
++                price: $price !== null ? (float) $price : null,
++                tookMs: $tookMs,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key, $this->label, $this->group, $e->getMessage(), $this->country);
++        }
++    }
++
++    /**
++     * Fetch (and cache) an OAuth2 access token for this seller account.
++     */
++    protected function token(): ?string
++    {
++        $cacheKey = "bol-token:{$this->key}";
++
++        if ($token = Cache::get($cacheKey)) {
++            return $token;
++        }
++
++        $response = Http::asForm()
++            ->withBasicAuth($this->clientId, $this->clientSecret)
++            ->timeout(15)
++            ->post($this->authUrl, [
++                'grant_type' => 'client_credentials',
++            ]);
++
++        if (! $response->successful()) {
++            return null;
++        }
++
++        $token = $response->json('access_token');
++        $expiresIn = (int) $response->json('expires_in', 300);
++
++        if ($token) {
++            // Cache a little shorter than the real expiry to stay safe.
++            Cache::put($cacheKey, $token, max(30, $expiresIn - 30));
++        }
++
++        return $token;
++    }
++}
+diff --git a/app/Services/Stock/Clients/OnlinefactClient.php b/app/Services/Stock/Clients/OnlinefactClient.php
+new file mode 100644
+index 0000000..3547598
+--- /dev/null
++++ b/app/Services/Stock/Clients/OnlinefactClient.php
+@@ -0,0 +1,121 @@
++<?php
++
++namespace App\Services\Stock\Clients;
++
++use App\Services\Stock\Contracts\StockSourceClient;
++use App\Services\Stock\DTO\StockResult;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * Client for the Onlinefact ERP API.
++ *
++ * @see https://api.onlinefact.be — GET /products.php?barcode=EAN
++ */
++class OnlinefactClient implements StockSourceClient
++{
++    public function __construct(
++        protected string $key,
++        protected string $label,
++        protected string $baseUrl,
++        protected ?string $apiKey,
++        protected ?string $apiSecret,
++    ) {}
++
++    public static function make(string $key, array $config): static
++    {
++        return new static(
++            key: $key,
++            label: $config['label'] ?? $key,
++            baseUrl: rtrim($config['base_url'] ?? 'https://api.onlinefact.be', '/'),
++            apiKey: $config['api_key'] ?? null,
++            apiSecret: $config['api_secret'] ?? null,
++        );
++    }
++
++    public function getStock(string $ean): StockResult
++    {
++        $started = microtime(true);
++
++        if (blank($this->apiKey) || blank($this->apiSecret)) {
++            return StockResult::failed($this->key, $this->label, 'ERP', 'Missing Onlinefact API credentials.');
++        }
++
++        try {
++            $response = Http::withBasicAuth($this->apiKey, $this->apiSecret)
++                ->timeout(15)
++                ->get("{$this->baseUrl}/products.php", [
++                    'barcode' => $ean,
++                    'fields' => 'product_id,reference,barcode,description,pricenetto,stock,categorie_id',
++                ]);
++
++            $tookMs = round((microtime(true) - $started) * 1000, 1);
++
++            if (! $response->successful()) {
++                return StockResult::failed($this->key, $this->label, 'ERP', "HTTP {$response->status()}");
++            }
++
++            $body = $response->json();
++            $results = $body['results'] ?? [];
++
++            if (empty($results)) {
++                return StockResult::notFound($this->key, $this->label, 'ERP');
++            }
++
++            $product = $results[0];
++
++            return new StockResult(
++                sourceKey: $this->key,
++                sourceLabel: $this->label,
++                group: 'ERP',
++                found: true,
++                description: $product['description'] ?? null,
++                sku: $product['reference'] ?? null,
++                stock: isset($product['stock']) ? (float) $product['stock'] : null,
++                price: isset($product['pricenetto']) ? (float) $product['pricenetto'] : null,
++                tookMs: $tookMs,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key, $this->label, 'ERP', $e->getMessage());
++        }
++    }
++
++    /**
++     * Fetch every barcode known to the ERP, used to seed a batch run.
++     * Onlinefact does not support pagination, so we page manually using
++     * `sinds_id` on product_id to keep memory usage predictable.
++     *
++     * @return list<string>
++     */
++    public function fetchAllEans(int $chunkSize = 500): array
++    {
++        $eans = [];
++        $sinceId = 0;
++
++        do {
++            $response = Http::withBasicAuth($this->apiKey, $this->apiSecret)
++                ->timeout(30)
++                ->get("{$this->baseUrl}/products.php", [
++                    'fields' => 'product_id,barcode',
++                    'sinds_id' => $sinceId,
++                    'limit' => $chunkSize,
++                ]);
++
++            if (! $response->successful()) {
++                break;
++            }
++
++            $results = $response->json('results', []);
++
++            foreach ($results as $product) {
++                $sinceId = max($sinceId, (int) ($product['product_id'] ?? 0));
++
++                if (! empty($product['barcode'])) {
++                    $eans[] = (string) $product['barcode'];
++                }
++            }
++        } while (count($results) >= $chunkSize);
++
++        return array_values(array_unique($eans));
++    }
++}
+diff --git a/app/Services/Stock/Clients/WooCommerceClient.php b/app/Services/Stock/Clients/WooCommerceClient.php
+new file mode 100644
+index 0000000..1d447c7
+--- /dev/null
++++ b/app/Services/Stock/Clients/WooCommerceClient.php
+@@ -0,0 +1,112 @@
++<?php
++
++namespace App\Services\Stock\Clients;
++
++use App\Services\Stock\Contracts\StockSourceClient;
++use App\Services\Stock\DTO\StockResult;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * Client for a single WooCommerce shop's REST API (v3).
++ *
++ * Looks products up by the native `global_unique_id` field (GTIN/UPC/EAN/ISBN,
++ * available since WooCommerce 9.2) and falls back to matching the EAN
++ * against the product SKU, which is a common convention for shops that
++ * don't use the native GTIN field yet.
++ *
++ * @see https://woocommerce.com/document/woocommerce-rest-api/
++ */
++class WooCommerceClient implements StockSourceClient
++{
++    public function __construct(
++        protected string $key,
++        protected string $label,
++        protected string $group,
++        protected string $baseUrl,
++        protected ?string $consumerKey,
++        protected ?string $consumerSecret,
++    ) {}
++
++    public static function make(string $key, array $config): static
++    {
++        return new static(
++            key: $key,
++            label: $config['label'] ?? $key,
++            group: $config['group'] ?? 'WooCommerce',
++            baseUrl: rtrim($config['base_url'] ?? '', '/'),
++            consumerKey: $config['consumer_key'] ?? null,
++            consumerSecret: $config['consumer_secret'] ?? null,
++        );
++    }
++
++    public function getStock(string $ean): StockResult
++    {
++        $started = microtime(true);
++
++        if (blank($this->consumerKey) || blank($this->consumerSecret)) {
++            return StockResult::failed($this->key, $this->label, $this->group, 'Missing WooCommerce API credentials.');
++        }
++
++        try {
++            $product = $this->findByGlobalUniqueId($ean) ?? $this->findBySku($ean);
++
++            $tookMs = round((microtime(true) - $started) * 1000, 1);
++
++            if (! $product) {
++                return StockResult::notFound($this->key, $this->label, $this->group);
++            }
++
++            return new StockResult(
++                sourceKey: $this->key,
++                sourceLabel: $this->label,
++                group: $this->group,
++                found: true,
++                description: $product['name'] ?? null,
++                sku: $product['sku'] ?? null,
++                stock: isset($product['stock_quantity']) && $product['stock_quantity'] !== null
++                    ? (float) $product['stock_quantity']
++                    : null,
++                price: isset($product['price']) && $product['price'] !== '' ? (float) $product['price'] : null,
++                tookMs: $tookMs,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key, $this->label, $this->group, $e->getMessage());
++        }
++    }
++
++    protected function findByGlobalUniqueId(string $ean): ?array
++    {
++        $response = $this->client()->get('/wp-json/wc/v3/products', [
++            'global_unique_id' => $ean,
++            'per_page' => 1,
++        ]);
++
++        if (! $response->successful()) {
++            return null;
++        }
++
++        return $response->json('0');
++    }
++
++    protected function findBySku(string $ean): ?array
++    {
++        $response = $this->client()->get('/wp-json/wc/v3/products', [
++            'sku' => $ean,
++            'per_page' => 1,
++        ]);
++
++        if (! $response->successful()) {
++            return null;
++        }
++
++        return $response->json('0');
++    }
++
++    protected function client()
++    {
++        return Http::withBasicAuth($this->consumerKey, $this->consumerSecret)
++            ->timeout(15)
++            ->baseUrl($this->baseUrl);
++    }
++}
+diff --git a/app/Services/Stock/Contracts/StockSourceClient.php b/app/Services/Stock/Contracts/StockSourceClient.php
+new file mode 100644
+index 0000000..8f255d0
+--- /dev/null
++++ b/app/Services/Stock/Contracts/StockSourceClient.php
+@@ -0,0 +1,21 @@
++<?php
++
++namespace App\Services\Stock\Contracts;
++
++use App\Services\Stock\DTO\StockResult;
++
++interface StockSourceClient
++{
++    /**
++     * Build a client instance for the given source configuration.
++     *
++     * @param  string  $key  The source key as defined in config('monitor.sources').
++     * @param  array<string, mixed>  $config  The source's own config array.
++     */
++    public static function make(string $key, array $config): static;
++
++    /**
++     * Look up the current stock level for a single EAN.
++     */
++    public function getStock(string $ean): StockResult;
++}
+diff --git a/app/Services/Stock/DTO/StockResult.php b/app/Services/Stock/DTO/StockResult.php
+new file mode 100644
+index 0000000..3c7b130
+--- /dev/null
++++ b/app/Services/Stock/DTO/StockResult.php
+@@ -0,0 +1,60 @@
++<?php
++
++namespace App\Services\Stock\DTO;
++
++class StockResult
++{
++    public function __construct(
++        public readonly string $sourceKey,
++        public readonly string $sourceLabel,
++        public readonly string $group,
++        public readonly ?string $country = null,
++        public readonly bool $found = false,
++        public readonly ?string $description = null,
++        public readonly ?string $sku = null,
++        public readonly ?float $stock = null,
++        public readonly ?float $price = null,
++        public readonly ?string $error = null,
++        public readonly float $tookMs = 0.0,
++    ) {}
++
++    public static function notFound(string $sourceKey, string $sourceLabel, string $group, ?string $country = null): self
++    {
++        return new self(
++            sourceKey: $sourceKey,
++            sourceLabel: $sourceLabel,
++            group: $group,
++            country: $country,
++            found: false,
++        );
++    }
++
++    public static function failed(string $sourceKey, string $sourceLabel, string $group, string $error, ?string $country = null): self
++    {
++        return new self(
++            sourceKey: $sourceKey,
++            sourceLabel: $sourceLabel,
++            group: $group,
++            country: $country,
++            found: false,
++            error: $error,
++        );
++    }
++
++    public function toArray(): array
++    {
++        return [
++            'source_key' => $this->sourceKey,
++            'source_label' => $this->sourceLabel,
++            'group' => $this->group,
++            'country' => $this->country,
++            'found' => $this->found,
++            'description' => $this->description,
++            'sku' => $this->sku,
++            'stock' => $this->stock,
++            'price' => $this->price,
++            'error' => $this->error,
++            'took_ms' => $this->tookMs,
++        ];
++    }
++}
+diff --git a/app/Services/Stock/SourceRegistry.php b/app/Services/Stock/SourceRegistry.php
+new file mode 100644
+index 0000000..c68d6fc
+--- /dev/null
++++ b/app/Services/Stock/SourceRegistry.php
+@@ -0,0 +1,52 @@
++<?php
++
++namespace App\Services\Stock;
++
++use App\Services\Stock\Contracts\StockSourceClient;
++use Illuminate\Support\Collection;
++
++class SourceRegistry
++{
++    /**
++     * @return Collection<string, StockSourceClient>
++     */
++    public function all(): Collection
++    {
++        return collect(config('monitor.sources', []))
++            ->map(function (array $config, string $key) {
++                /** @var class-string<StockSourceClient> $driver */
++                $driver = $config['driver'];
++
++                return $driver::make($key, $config);
++            });
++    }
++
++    public function master(): StockSourceClient
++    {
++        $masterKey = config('monitor.master_source');
++
++        return $this->all()->get($masterKey)
++            ?? throw new \RuntimeException("Master source [{$masterKey}] is not configured.");
++    }
++
++    public function masterKey(): string
++    {
++        return config('monitor.master_source');
++    }
++
++    /**
++     * @return Collection<int, array{key: string, label: string, group: string, country: ?string}>
++     */
++    public function meta(): Collection
++    {
++        return collect(config('monitor.sources', []))
++            ->map(fn (array $config, string $key) => [
++                'key' => $key,
++                'label' => $config['label'] ?? $key,
++                'group' => $config['group'] ?? 'Other',
++                'country' => $config['country'] ?? null,
++                'is_master' => $key === config('monitor.master_source'),
++            ])
++            ->values();
++    }
++}
+diff --git a/app/Services/Stock/StockAggregatorService.php b/app/Services/Stock/StockAggregatorService.php
+new file mode 100644
+index 0000000..32a267c
+--- /dev/null
++++ b/app/Services/Stock/StockAggregatorService.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace App\Services\Stock;
++
++use App\Services\Stock\DTO\StockResult;
++use Illuminate\Support\Collection;
++
++class StockAggregatorService
++{
++    public function __construct(
++        protected SourceRegistry $sources,
++    ) {}
++
++    /**
++     * Look up an EAN across every configured source.
++     *
++     * @return array{
++     *     ean: string,
++     *     master_source: string,
++     *     master: ?StockResult,
++     *     results: Collection<int, array>,
++     * }
++     */
++    public function check(string $ean): array
++    {
++        $ean = trim($ean);
++        $masterKey = $this->sources->masterKey();
++
++        /** @var Collection<int, StockResult> $results */
++        $results = $this->sources->all()->map(
++            fn ($client) => $client->getStock($ean)
++        )->values();
++
++        $master = $results->firstWhere('sourceKey', $masterKey);
++        $masterStock = $master && $master->found ? $master->stock : null;
++
++        $withDiff = $results->map(function (StockResult $result) use ($masterKey, $masterStock) {
++            $data = $result->toArray();
++            $data['is_master'] = $result->sourceKey === $masterKey;
++
++            $data['diff'] = (! $data['is_master'] && $result->found && $masterStock !== null)
++                ? round($result->stock - $masterStock, 2)
++                : null;
++
++            return $data;
++        });
++
++        return [
++            'ean' => $ean,
++            'master_source' => $masterKey,
++            'master_stock' => $masterStock,
++            'results' => $withDiff,
++        ];
++    }
++}
+diff --git a/composer.json b/composer.json
+index fc40bb1..8a7057d 100644
+--- a/composer.json
++++ b/composer.json
+@@ -16,7 +16,8 @@
+         "laravel/tinker": "^3.0",
+         "livewire/blaze": "^1.0",
+         "livewire/flux": "^2.13.1",
+-        "livewire/livewire": "^4.1"
++        "livewire/livewire": "^4.1",
++        "tallstackui/tallstackui": "^4.0"
+     },
+     "require-dev": {
+         "fakerphp/faker": "^1.24",
+diff --git a/config/monitor.php b/config/monitor.php
+new file mode 100644
+index 0000000..340690c
+--- /dev/null
++++ b/config/monitor.php
+@@ -0,0 +1,141 @@
++<?php
++
++return [
++
++    /*
++    |--------------------------------------------------------------------------
++    | Master source
++    |--------------------------------------------------------------------------
++    |
++    | The key of the source that holds the "real" stock level. All other
++    | sources are compared against this one. Must match a "key" below.
++    |
++    */
++    'master_source' => env('MONITOR_MASTER_SOURCE', 'onlinefact'),
++
++    /*
++    |--------------------------------------------------------------------------
++    | Batch processing
++    |--------------------------------------------------------------------------
++    */
++    'batch' => [
++        // Queue that batch jobs are dispatched on.
++        'queue' => env('MONITOR_BATCH_QUEUE', 'monitor'),
++
++        // How many EANs may be checked concurrently is controlled by how many
++        // `queue:work` workers you run against the queue above.
++        'chunk' => 200,
++    ],
++
++    /*
++    |--------------------------------------------------------------------------
++    | Sources
++    |--------------------------------------------------------------------------
++    |
++    | Every place a stock level for an EAN can come from. "driver" points to
++    | the client class responsible for talking to that system. Each entry is
++    | intentionally independent, so shops/accounts can be added or removed
++    | without touching any code.
++    |
++    */
++    'sources' => [
++
++        'onlinefact' => [
++            'label' => 'Onlinefact (ERP)',
++            'group' => 'ERP',
++            'type' => 'erp',
++            'driver' => \App\Services\Stock\Clients\OnlinefactClient::class,
++            'base_url' => env('ONLINEFACT_API_URL', 'https://api.onlinefact.be'),
++            'api_key' => env('ONLINEFACT_API_KEY'),
++            'api_secret' => env('ONLINEFACT_API_SECRET'),
++        ],
++
++        'dekookwinkel' => [
++            'label' => 'De Kookwinkel',
++            'group' => 'WooCommerce',
++            'type' => 'woocommerce',
++            'driver' => \App\Services\Stock\Clients\WooCommerceClient::class,
++            'base_url' => env('WOOCOMMERCE_DEKOOKWINKEL_URL', 'https://dekookwinkel.be'),
++            'consumer_key' => env('WOOCOMMERCE_DEKOOKWINKEL_KEY'),
++            'consumer_secret' => env('WOOCOMMERCE_DEKOOKWINKEL_SECRET'),
++        ],
++
++        'koraly' => [
++            'label' => 'Koraly BV',
++            'group' => 'WooCommerce',
++            'type' => 'woocommerce',
++            'driver' => \App\Services\Stock\Clients\WooCommerceClient::class,
++            'base_url' => env('WOOCOMMERCE_KORALY_URL', 'https://koralybv.com'),
++            'consumer_key' => env('WOOCOMMERCE_KORALY_KEY'),
++            'consumer_secret' => env('WOOCOMMERCE_KORALY_SECRET'),
++        ],
++
++        'outlet_elektro' => [
++            'label' => 'Outlet Elektro',
++            'group' => 'WooCommerce',
++            'type' => 'woocommerce',
++            'driver' => \App\Services\Stock\Clients\WooCommerceClient::class,
++            'base_url' => env('WOOCOMMERCE_OUTLET_ELEKTRO_URL', 'https://outlet-elektro.be'),
++            'consumer_key' => env('WOOCOMMERCE_OUTLET_ELEKTRO_KEY'),
++            'consumer_secret' => env('WOOCOMMERCE_OUTLET_ELEKTRO_SECRET'),
++        ],
++
++        'bol_koraly_be' => [
++            'label' => 'Koraly BV BE (bol.com)',
++            'group' => 'Bol.com',
++            'type' => 'bol',
++            'driver' => \App\Services\Stock\Clients\BolComClient::class,
++            'shop' => 'koraly',
++            'country' => 'BE',
++            'client_id' => env('BOL_KORALY_BE_CLIENT_ID'),
++            'client_secret' => env('BOL_KORALY_BE_CLIENT_SECRET'),
++        ],
++
++        'bol_koraly_nl' => [
++            'label' => 'Koraly BV NL (bol.com)',
++            'group' => 'Bol.com',
++            'type' => 'bol',
++            'driver' => \App\Services\Stock\Clients\BolComClient::class,
++            'shop' => 'koraly',
++            'country' => 'NL',
++            'client_id' => env('BOL_KORALY_NL_CLIENT_ID'),
++            'client_secret' => env('BOL_KORALY_NL_CLIENT_SECRET'),
++        ],
++
++        'bol_outlet_elektro_be' => [
++            'label' => 'Exellent Electro Riemst BE (bol.com)',
++            'group' => 'Bol.com',
++            'type' => 'bol',
++            'driver' => \App\Services\Stock\Clients\BolComClient::class,
++            'shop' => 'outlet_elektro',
++            'country' => 'BE',
++            'client_id' => env('BOL_OUTLET_ELEKTRO_BE_CLIENT_ID'),
++            'client_secret' => env('BOL_OUTLET_ELEKTRO_BE_CLIENT_SECRET'),
++        ],
++
++        'bol_outlet_elektro_nl' => [
++            'label' => 'Exellent Electro Riemst NL (bol.com)',
++            'group' => 'Bol.com',
++            'type' => 'bol',
++            'driver' => \App\Services\Stock\Clients\BolComClient::class,
++            'shop' => 'outlet_elektro',
++            'country' => 'NL',
++            'client_id' => env('BOL_OUTLET_ELEKTRO_NL_CLIENT_ID'),
++            'client_secret' => env('BOL_OUTLET_ELEKTRO_NL_CLIENT_SECRET'),
++        ],
++
++    ],
++
++    /*
++    |--------------------------------------------------------------------------
++    | Bol.com
++    |--------------------------------------------------------------------------
++    */
++    'bol' => [
++        'auth_url' => env('BOL_AUTH_URL', 'https://login.bol.com/token'),
++        'api_url' => env('BOL_API_URL', 'https://api.bol.com/retailer'),
++        // Accept header version, see https://api.bol.com/retailer/public/Retailer-API
++        'accept' => env('BOL_ACCEPT_HEADER', 'application/vnd.retailer.v10+json'),
++    ],
++
++];
+diff --git a/database/migrations/2026_08_23_100000_create_batch_runs_table.php b/database/migrations/2026_08_23_100000_create_batch_runs_table.php
+new file mode 100644
+index 0000000..578bd79
+--- /dev/null
++++ b/database/migrations/2026_08_23_100000_create_batch_runs_table.php
+@@ -0,0 +1,30 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('batch_runs', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
++            $table->string('status')->default('pending'); // pending, running, completed, failed
++            $table->unsignedInteger('total')->default(0);
++            $table->unsignedInteger('processed')->default(0);
++            $table->unsignedInteger('mismatches')->default(0);
++            $table->unsignedInteger('errors')->default(0);
++            $table->string('source')->default('erp'); // where the EAN list came from: erp, upload, paste
++            $table->timestamp('started_at')->nullable();
++            $table->timestamp('finished_at')->nullable();
++            $table->timestamps();
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('batch_runs');
++    }
++};
+diff --git a/database/migrations/2026_08_23_100001_create_batch_run_items_table.php b/database/migrations/2026_08_23_100001_create_batch_run_items_table.php
+new file mode 100644
+index 0000000..af77d39
+--- /dev/null
++++ b/database/migrations/2026_08_23_100001_create_batch_run_items_table.php
+@@ -0,0 +1,32 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('batch_run_items', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('batch_run_id')->constrained()->cascadeOnDelete();
++            $table->string('ean')->index();
++            $table->string('description')->nullable();
++            $table->string('status')->default('pending'); // pending, checked, failed
++            $table->decimal('master_stock', 12, 2)->nullable();
++            $table->boolean('has_mismatch')->default(false);
++            $table->boolean('has_error')->default(false);
++            $table->json('results')->nullable();
++            $table->timestamp('checked_at')->nullable();
++            $table->timestamps();
++
++            $table->unique(['batch_run_id', 'ean']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('batch_run_items');
++    }
++};
+diff --git a/resources/css/app.css b/resources/css/app.css
+index ad6eeed..eb46ced 100644
+--- a/resources/css/app.css
++++ b/resources/css/app.css
+@@ -5,6 +5,7 @@
+ @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+ @source '../../vendor/livewire/flux-pro/stubs/**/*.blade.php';
+ @source '../../vendor/livewire/flux/stubs/**/*.blade.php';
++@source '../../vendor/tallstackui/tallstackui/resources/**/*.blade.php';
+ 
+ @custom-variant dark (&:where(.dark, .dark *));
+ 
+diff --git a/resources/views/layouts/app/sidebar.blade.php b/resources/views/layouts/app/sidebar.blade.php
+index 6db2170..02e01cb 100644
+--- a/resources/views/layouts/app/sidebar.blade.php
++++ b/resources/views/layouts/app/sidebar.blade.php
+@@ -16,6 +16,15 @@
+                         {{ __('Dashboard') }}
+                     </flux:sidebar.item>
+                 </flux:sidebar.group>
++
++                <flux:sidebar.group :heading="__('Stock monitor')" class="grid">
++                    <flux:sidebar.item icon="magnifying-glass" :href="route('stock.lookup')" :current="request()->routeIs('stock.lookup')" wire:navigate>
++                        {{ __('EAN lookup') }}
++                    </flux:sidebar.item>
++                    <flux:sidebar.item icon="queue-list" :href="route('stock.batch')" :current="request()->routeIs('stock.batch')" wire:navigate>
++                        {{ __('Batch comparison') }}
++                    </flux:sidebar.item>
++                </flux:sidebar.group>
+             </flux:sidebar.nav>
+ 
+             <flux:spacer />
+diff --git a/resources/views/livewire/stock/batch-run-page.blade.php b/resources/views/livewire/stock/batch-run-page.blade.php
+new file mode 100644
+index 0000000..e2d5dd4
+--- /dev/null
++++ b/resources/views/livewire/stock/batch-run-page.blade.php
+@@ -0,0 +1,176 @@
++<x-layouts::app :title="__('Batch stock comparison')">
++    <div
++        class="flex w-full flex-1 flex-col gap-6"
++        @if ($this->isLive) wire:poll.2s @endif
++    >
++        <div class="flex flex-wrap items-center justify-between gap-4">
++            <div>
++                <flux:heading size="xl">{{ __('Batch stock comparison') }}</flux:heading>
++                <flux:text class="mt-1">
++                    {{ __('Check every EAN in one go and watch results come in live.') }}
++                </flux:text>
++            </div>
++
++            @if ($this->recentRuns->isNotEmpty())
++                <x-select
++                    wire:model.live="batchRunId"
++                    :options="$this->recentRuns->map(fn ($run) => [
++                        'value' => $run->id,
++                        'label' => $run->created_at->format('d/m/Y H:i').' — '.$run->status.' ('.$run->processed.'/'.$run->total.')',
++                    ])"
++                    option-value="value"
++                    option-label="label"
++                    placeholder="{{ __('Select a run') }}"
++                    class="min-w-72"
++                />
++            @endif
++        </div>
++
++        <div class="grid gap-6 lg:grid-cols-3">
++            <x-card class="lg:col-span-1">
++                <flux:heading size="lg">{{ __('Start a new run') }}</flux:heading>
++
++                <div class="mt-4 space-y-4">
++                    <div>
++                        <flux:text class="mb-2 font-medium">{{ __('All products from the ERP') }}</flux:text>
++                        <flux:text class="mb-2 text-xs">{{ __('Pulls every EAN known to Onlinefact and checks it against every source.') }}</flux:text>
++                        <x-button wire:click="startFromErp" wire:loading.attr="disabled" spinner="startFromErp" primary block>
++                            {{ __('Launch full comparison') }}
++                        </x-button>
++                    </div>
++
++                    <hr class="border-zinc-200 dark:border-zinc-700">
++
++                    <form wire:submit="startFromPaste" class="space-y-2">
++                        <flux:text class="font-medium">{{ __('Or paste a list of EANs') }}</flux:text>
++                        <x-textarea
++                            wire:model="pastedEans"
++                            placeholder="{{ __('One EAN per line, or separated by commas/spaces') }}"
++                            rows="5"
++                        />
++                        <x-button type="submit" wire:loading.attr="disabled" spinner="startFromPaste" block>
++                            {{ __('Launch this list') }}
++                        </x-button>
++                    </form>
++                </div>
++            </x-card>
++
++            <div class="lg:col-span-2">
++                @if ($this->batchRun)
++                    <x-card>
++                        <div class="flex flex-wrap items-center justify-between gap-4">
++                            <div>
++                                <flux:heading size="lg">
++                                    {{ __('Run #:id', ['id' => $this->batchRun->id]) }}
++                                    <x-badge
++                                        text="{{ ucfirst($this->batchRun->status) }}"
++                                        color="{{ match ($this->batchRun->status) {
++                                            'completed' => 'green',
++                                            'running', 'pending' => 'indigo',
++                                            default => 'zinc',
++                                        } }}"
++                                        sm
++                                    />
++                                </flux:heading>
++                                <flux:text class="mt-1">
++                                    {{ __(':processed / :total checked · :mismatches mismatches · :errors errors', [
++                                        'processed' => $this->batchRun->processed,
++                                        'total' => $this->batchRun->total,
++                                        'mismatches' => $this->batchRun->mismatches,
++                                        'errors' => $this->batchRun->errors,
++                                    ]) }}
++                                </flux:text>
++                            </div>
++
++                            <div class="flex gap-2">
++                                <x-button wire:click="$set('filter', 'all')" :outline="$filter !== 'all'" sm>{{ __('All') }}</x-button>
++                                <x-button wire:click="$set('filter', 'mismatches')" :outline="$filter !== 'mismatches'" sm>{{ __('Mismatches') }}</x-button>
++                                <x-button wire:click="$set('filter', 'errors')" :outline="$filter !== 'errors'" sm>{{ __('Errors') }}</x-button>
++                                <x-button wire:click="$set('filter', 'pending')" :outline="$filter !== 'pending'" sm>{{ __('Pending') }}</x-button>
++                            </div>
++                        </div>
++
++                        <div class="mt-3 h-2 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
++                            <div
++                                class="h-full rounded-full bg-indigo-500 transition-all"
++                                style="width: {{ $this->batchRun->progressPercentage() }}%"
++                            ></div>
++                        </div>
++
++                        <div class="mt-4 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
++                            <table class="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-700">
++                                <thead class="bg-zinc-50 dark:bg-zinc-800/60">
++                                    <tr>
++                                        <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('EAN') }}</th>
++                                        <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Description') }}</th>
++                                        <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('ERP stock') }}</th>
++                                        <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Per source') }}</th>
++                                        <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Status') }}</th>
++                                    </tr>
++                                </thead>
++                                <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
++                                    @forelse ($items ?? [] as $item)
++                                        <tr>
++                                            <td class="px-4 py-2 font-mono">{{ $item->ean }}</td>
++                                            <td class="px-4 py-2 text-zinc-600 dark:text-zinc-300">{{ $item->description ?? '—' }}</td>
++                                            <td class="px-4 py-2 text-right font-mono">
++                                                {{ $item->master_stock === null ? '—' : rtrim(rtrim(number_format($item->master_stock, 2, '.', ''), '0'), '.') }}
++                                            </td>
++                                            <td class="px-4 py-2">
++                                                <div class="flex flex-wrap gap-1.5">
++                                                    @foreach ($item->results ?? [] as $result)
++                                                        @if (! $result['is_master'])
++                                                            <span
++                                                                title="{{ $result['source_label'] }}: {{ $result['error'] ?? ($result['found'] ? $result['stock'] : __('not found')) }}"
++                                                                @class([
++                                                                    'inline-flex items-center rounded px-1.5 py-0.5 text-xs font-mono',
++                                                                    'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' => $result['error'],
++                                                                    'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400' => ! $result['error'] && ! $result['found'],
++                                                                    'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' => ! $result['error'] && $result['found'] && (float) ($result['diff'] ?? 0) === 0.0,
++                                                                    'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' => ! $result['error'] && $result['found'] && (float) ($result['diff'] ?? 0) !== 0.0,
++                                                                ])
++                                                            >
++                                                                {{ $result['source_key'] }}: {{ $result['found'] ? rtrim(rtrim(number_format($result['stock'], 2, '.', ''), '0'), '.') : '✕' }}
++                                                            </span>
++                                                        @endif
++                                                    @endforeach
++                                                </div>
++                                            </td>
++                                            <td class="px-4 py-2">
++                                                @if ($item->status === 'pending')
++                                                    <x-badge text="{{ __('pending') }}" color="zinc" sm />
++                                                @elseif ($item->has_error)
++                                                    <x-badge text="{{ __('error') }}" color="red" sm />
++                                                @elseif ($item->has_mismatch)
++                                                    <x-badge text="{{ __('mismatch') }}" color="amber" sm />
++                                                @else
++                                                    <x-badge text="{{ __('ok') }}" color="green" sm />
++                                                @endif
++                                            </td>
++                                        </tr>
++                                    @empty
++                                        <tr>
++                                            <td colspan="5" class="px-4 py-6 text-center text-zinc-500">
++                                                {{ __('No items yet.') }}
++                                            </td>
++                                        </tr>
++                                    @endforelse
++                                </tbody>
++                            </table>
++                        </div>
++
++                        @if ($items)
++                            <div class="mt-4">
++                                {{ $items->links() }}
++                            </div>
++                        @endif
++                    </x-card>
++                @else
++                    <x-card>
++                        <flux:text>{{ __('No batch run yet — start one on the left.') }}</flux:text>
++                    </x-card>
++                @endif
++            </div>
++        </div>
++    </div>
++</x-layouts::app>
+diff --git a/resources/views/livewire/stock/ean-lookup.blade.php b/resources/views/livewire/stock/ean-lookup.blade.php
+new file mode 100644
+index 0000000..ca7e3bd
+--- /dev/null
++++ b/resources/views/livewire/stock/ean-lookup.blade.php
+@@ -0,0 +1,103 @@
++<x-layouts::app :title="__('EAN stock lookup')">
++    <div class="flex w-full flex-1 flex-col gap-6">
++        <div>
++            <flux:heading size="xl">{{ __('EAN stock lookup') }}</flux:heading>
++            <flux:text class="mt-1">
++                {{ __('Look up a single EAN and compare its stock level across every connected source.') }}
++            </flux:text>
++        </div>
++
++        <x-card>
++            <form wire:submit="lookup" class="flex flex-col gap-4 sm:flex-row sm:items-end">
++                <div class="flex-1">
++                    <x-input
++                        wire:model="ean"
++                        label="{{ __('EAN / barcode') }}"
++                        placeholder="e.g. 8719505560000"
++                        autofocus
++                        clearable
++                    />
++                </div>
++
++                <x-button type="submit" wire:loading.attr="disabled" spinner="lookup" primary>
++                    {{ __('Check stock') }}
++                </x-button>
++            </form>
++        </x-card>
++
++        @if ($check)
++            <x-card>
++                <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
++                    <div>
++                        <flux:heading size="lg">{{ $check['ean'] }}</flux:heading>
++                        <flux:text class="mt-0.5">
++                            {{ __('Master stock (:source):', ['source' => $sourceMeta->firstWhere('key', $check['master_source'])['label'] ?? $check['master_source']]) }}
++                            <span class="font-semibold text-zinc-900 dark:text-zinc-100">
++                                {{ $check['master_stock'] === null ? __('unknown') : rtrim(rtrim(number_format($check['master_stock'], 2, '.', ''), '0'), '.') }}
++                            </span>
++                        </flux:text>
++                    </div>
++                </div>
++
++                <div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
++                    <table class="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-700">
++                        <thead class="bg-zinc-50 dark:bg-zinc-800/60">
++                            <tr>
++                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Source') }}</th>
++                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('SKU / reference') }}</th>
++                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Stock') }}</th>
++                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Difference') }}</th>
++                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Status') }}</th>
++                            </tr>
++                        </thead>
++                        <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
++                            @foreach ($check['results'] as $result)
++                                <tr class="{{ $result['is_master'] ? 'bg-zinc-50 dark:bg-zinc-800/40' : '' }}">
++                                    <td class="px-4 py-2">
++                                        <div class="font-medium text-zinc-900 dark:text-zinc-100">
++                                            {{ $result['source_label'] }}
++                                            @if ($result['is_master'])
++                                                <x-badge text="{{ __('master') }}" color="indigo" sm />
++                                            @endif
++                                        </div>
++                                        <div class="text-xs text-zinc-500">{{ $result['group'] }}</div>
++                                    </td>
++                                    <td class="px-4 py-2 text-zinc-600 dark:text-zinc-300">{{ $result['sku'] ?? '—' }}</td>
++                                    <td class="px-4 py-2 text-right font-mono">
++                                        {{ $result['found'] ? rtrim(rtrim(number_format($result['stock'], 2, '.', ''), '0'), '.') : '—' }}
++                                    </td>
++                                    <td class="px-4 py-2 text-right font-mono">
++                                        @if ($result['diff'] !== null)
++                                            <span class="{{ (float) $result['diff'] === 0.0 ? 'text-zinc-500' : ((float) $result['diff'] < 0 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400') }}">
++                                                {{ (float) $result['diff'] > 0 ? '+' : '' }}{{ rtrim(rtrim(number_format($result['diff'], 2, '.', ''), '0'), '.') }}
++                                            </span>
++                                        @else
++                                            —
++                                        @endif
++                                    </td>
++                                    <td class="px-4 py-2">
++                                        @if ($result['error'])
++                                            <x-badge text="{{ __('error') }}" color="red" sm />
++                                        @elseif (! $result['found'])
++                                            <x-badge text="{{ __('not found') }}" color="zinc" sm />
++                                        @elseif ($result['is_master'])
++                                            <x-badge text="{{ __('reference') }}" color="indigo" sm />
++                                        @elseif ((float) ($result['diff'] ?? 0) === 0.0)
++                                            <x-badge text="{{ __('in sync') }}" color="green" sm />
++                                        @else
++                                            <x-badge text="{{ __('mismatch') }}" color="amber" sm />
++                                        @endif
++
++                                        @if ($result['error'])
++                                            <div class="mt-1 text-xs text-red-500">{{ $result['error'] }}</div>
++                                        @endif
++                                    </td>
++                                </tr>
++                            @endforeach
++                        </tbody>
++                    </table>
++                </div>
++            </x-card>
++        @endif
++    </div>
++</x-layouts::app>
+diff --git a/routes/web.php b/routes/web.php
+index 12e932e..4cc5c0d 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -1,11 +1,16 @@
+ <?php
+ 
++use App\Livewire\Stock\BatchRunPage;
++use App\Livewire\Stock\EanLookup;
+ use Illuminate\Support\Facades\Route;
+ 
+ Route::view('/', 'welcome')->name('home');
+ 
+ Route::middleware(['auth', 'verified'])->group(function () {
+     Route::view('dashboard', 'dashboard')->name('dashboard');
++
++    Route::livewire('stock/lookup', EanLookup::class)->name('stock.lookup');
++    Route::livewire('stock/batch', BatchRunPage::class)->name('stock.batch');
+ });
+ 
+ require __DIR__.'/settings.php';

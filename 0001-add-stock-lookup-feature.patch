@@ -1,0 +1,1202 @@
+From d16e7f5d3ecb52c43c3ceab46a62f2e99f4d1e0e Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Sat, 15 Aug 2026 16:01:35 +0000
+Subject: [PATCH] Add multi-source stock lookup (WooCommerce, Bol.com,
+ Onlinefact)
+
+---
+ app/Contracts/StockProvider.php               | 24 +++++
+ app/Enums/StockSourceType.php                 | 19 ++++
+ app/Jobs/SyncWooCommerceCatalog.php           | 81 ++++++++++++++++
+ app/Livewire/StockLookup.php                  | 35 +++++++
+ app/Models/ProductEanMap.php                  | 32 +++++++
+ app/Models/StockSource.php                    | 48 ++++++++++
+ app/Services/StockAggregator.php              | 25 +++++
+ .../StockProviders/BolComStockProvider.php    | 96 +++++++++++++++++++
+ .../OnlinefactStockProvider.php               | 71 ++++++++++++++
+ .../StockProviders/StockProviderFactory.php   | 19 ++++
+ .../WooCommerceStockProvider.php              | 75 +++++++++++++++
+ app/Support/Stock/StockResult.php             | 26 +++++
+ database/factories/ProductEanMapFactory.php   | 26 +++++
+ database/factories/StockSourceFactory.php     | 69 +++++++++++++
+ ...8_15_100000_create_stock_sources_table.php | 29 ++++++
+ ...5_100001_create_product_ean_maps_table.php | 28 ++++++
+ resources/views/layouts/app/sidebar.blade.php |  4 +
+ .../views/livewire/stock-lookup.blade.php     | 76 +++++++++++++++
+ routes/console.php                            | 11 +++
+ routes/web.php                                |  3 +
+ tests/Feature/BolComStockProviderTest.php     | 42 ++++++++
+ tests/Feature/OnlinefactStockProviderTest.php | 55 +++++++++++
+ tests/Feature/StockLookupTest.php             | 42 ++++++++
+ .../Feature/WooCommerceStockProviderTest.php  | 43 +++++++++
+ 24 files changed, 979 insertions(+)
+ create mode 100644 app/Contracts/StockProvider.php
+ create mode 100644 app/Enums/StockSourceType.php
+ create mode 100644 app/Jobs/SyncWooCommerceCatalog.php
+ create mode 100644 app/Livewire/StockLookup.php
+ create mode 100644 app/Models/ProductEanMap.php
+ create mode 100644 app/Models/StockSource.php
+ create mode 100644 app/Services/StockAggregator.php
+ create mode 100644 app/Services/StockProviders/BolComStockProvider.php
+ create mode 100644 app/Services/StockProviders/OnlinefactStockProvider.php
+ create mode 100644 app/Services/StockProviders/StockProviderFactory.php
+ create mode 100644 app/Services/StockProviders/WooCommerceStockProvider.php
+ create mode 100644 app/Support/Stock/StockResult.php
+ create mode 100644 database/factories/ProductEanMapFactory.php
+ create mode 100644 database/factories/StockSourceFactory.php
+ create mode 100644 database/migrations/2026_08_15_100000_create_stock_sources_table.php
+ create mode 100644 database/migrations/2026_08_15_100001_create_product_ean_maps_table.php
+ create mode 100644 resources/views/livewire/stock-lookup.blade.php
+ create mode 100644 tests/Feature/BolComStockProviderTest.php
+ create mode 100644 tests/Feature/OnlinefactStockProviderTest.php
+ create mode 100644 tests/Feature/StockLookupTest.php
+ create mode 100644 tests/Feature/WooCommerceStockProviderTest.php
+
+diff --git a/app/Contracts/StockProvider.php b/app/Contracts/StockProvider.php
+new file mode 100644
+index 0000000..54bc289
+--- /dev/null
++++ b/app/Contracts/StockProvider.php
+@@ -0,0 +1,24 @@
++<?php
++
++namespace App\Contracts;
++
++use App\Support\Stock\StockResult;
++
++interface StockProvider
++{
++    /**
++     * A stable identifier for this specific configured source, e.g. "woocommerce:3".
++     */
++    public function key(): string;
++
++    /**
++     * Human readable label to show in the UI, e.g. "Shop A (NL)".
++     */
++    public function label(): string;
++
++    /**
++     * Look up stock for a single EAN/barcode. Must never throw — implementations
++     * are expected to catch their own exceptions and return StockResult::failed().
++     */
++    public function getStockByEan(string $ean): StockResult;
++}
+diff --git a/app/Enums/StockSourceType.php b/app/Enums/StockSourceType.php
+new file mode 100644
+index 0000000..ab1f99e
+--- /dev/null
++++ b/app/Enums/StockSourceType.php
+@@ -0,0 +1,19 @@
++<?php
++
++namespace App\Enums;
++
++enum StockSourceType: string
++{
++    case WooCommerce = 'woocommerce';
++    case BolCom = 'bol_com';
++    case Onlinefact = 'onlinefact';
++
++    public function label(): string
++    {
++        return match ($this) {
++            self::WooCommerce => 'WooCommerce',
++            self::BolCom => 'Bol.com',
++            self::Onlinefact => 'Onlinefact',
++        };
++    }
++}
+diff --git a/app/Jobs/SyncWooCommerceCatalog.php b/app/Jobs/SyncWooCommerceCatalog.php
+new file mode 100644
+index 0000000..038e0fe
+--- /dev/null
++++ b/app/Jobs/SyncWooCommerceCatalog.php
+@@ -0,0 +1,81 @@
++<?php
++
++namespace App\Jobs;
++
++use App\Models\ProductEanMap;
++use App\Models\StockSource;
++use Illuminate\Bus\Queueable;
++use Illuminate\Contracts\Queue\ShouldQueue;
++use Illuminate\Foundation\Bus\Dispatchable;
++use Illuminate\Queue\InteractsWithQueue;
++use Illuminate\Queue\SerializesModels;
++use Illuminate\Support\Facades\Http;
++use Illuminate\Support\Facades\Log;
++
++class SyncWooCommerceCatalog implements ShouldQueue
++{
++    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
++
++    public int $tries = 1;
++
++    public int $timeout = 600;
++
++    public function __construct(public readonly StockSource $source) {}
++
++    public function handle(): void
++    {
++        $credentials = $this->source->credentials ?? [];
++        $eanMetaKey = $this->source->meta['ean_meta_key'] ?? '_ean';
++
++        $page = 1;
++
++        do {
++            $response = Http::withBasicAuth(
++                $credentials['consumer_key'] ?? '',
++                $credentials['consumer_secret'] ?? '',
++            )
++                ->timeout(30)
++                ->get(rtrim((string) $this->source->base_url, '/').'/wp-json/wc/v3/products', [
++                    'per_page' => 100,
++                    'page' => $page,
++                    '_fields' => 'id,sku,meta_data',
++                ]);
++
++            if ($response->failed()) {
++                Log::warning('WooCommerce catalog sync failed', [
++                    'stock_source_id' => $this->source->id,
++                    'page' => $page,
++                    'status' => $response->status(),
++                ]);
++
++                return;
++            }
++
++            /** @var array<int, array{id:int,sku:?string,meta_data:array}> $products */
++            $products = $response->json();
++
++            foreach ($products as $product) {
++                $ean = collect($product['meta_data'] ?? [])
++                    ->firstWhere('key', $eanMetaKey)['value'] ?? null;
++
++                if (! $ean) {
++                    continue;
++                }
++
++                ProductEanMap::updateOrCreate(
++                    [
++                        'stock_source_id' => $this->source->id,
++                        'ean' => $ean,
++                    ],
++                    [
++                        'external_product_id' => $product['id'],
++                        'sku' => $product['sku'] ?? null,
++                        'last_synced_at' => now(),
++                    ],
++                );
++            }
++
++            $page++;
++        } while (count($products) === 100);
++    }
++}
+diff --git a/app/Livewire/StockLookup.php b/app/Livewire/StockLookup.php
+new file mode 100644
+index 0000000..8a1e96e
+--- /dev/null
++++ b/app/Livewire/StockLookup.php
+@@ -0,0 +1,35 @@
++<?php
++
++namespace App\Livewire;
++
++use App\Services\StockAggregator;
++use App\Support\Stock\StockResult;
++use Illuminate\Support\Collection;
++use Livewire\Attributes\Title;
++use Livewire\Component;
++
++#[Title('Stock lookup')]
++class StockLookup extends Component
++{
++    public string $ean = '';
++
++    public bool $searched = false;
++
++    /** @var Collection<int, StockResult> */
++    public Collection $results;
++
++    public function mount(): void
++    {
++        $this->results = collect();
++    }
++
++    public function search(StockAggregator $aggregator): void
++    {
++        $this->validate([
++            'ean' => ['required', 'string', 'min:8', 'max:14'],
++        ]);
++
++        $this->results = $aggregator->lookup($this->ean);
++        $this->searched = true;
++    }
++}
+diff --git a/app/Models/ProductEanMap.php b/app/Models/ProductEanMap.php
+new file mode 100644
+index 0000000..361e201
+--- /dev/null
++++ b/app/Models/ProductEanMap.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class ProductEanMap extends Model
++{
++    use HasFactory;
++
++    protected $fillable = [
++        'stock_source_id',
++        'ean',
++        'external_product_id',
++        'sku',
++        'last_synced_at',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'last_synced_at' => 'datetime',
++        ];
++    }
++
++    public function stockSource(): BelongsTo
++    {
++        return $this->belongsTo(StockSource::class);
++    }
++}
+diff --git a/app/Models/StockSource.php b/app/Models/StockSource.php
+new file mode 100644
+index 0000000..0d011ba
+--- /dev/null
++++ b/app/Models/StockSource.php
+@@ -0,0 +1,48 @@
++<?php
++
++namespace App\Models;
++
++use App\Enums\StockSourceType;
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\HasMany;
++
++class StockSource extends Model
++{
++    use HasFactory;
++
++    protected $fillable = [
++        'type',
++        'label',
++        'is_active',
++        'credentials',
++        'base_url',
++        'meta',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'type' => StockSourceType::class,
++            'is_active' => 'boolean',
++            'credentials' => 'encrypted:array',
++            'meta' => 'array',
++        ];
++    }
++
++    public function eanMaps(): HasMany
++    {
++        return $this->hasMany(ProductEanMap::class);
++    }
++
++    public function scopeActive(Builder $query): Builder
++    {
++        return $query->where('is_active', true);
++    }
++
++    public function scopeOfType(Builder $query, StockSourceType $type): Builder
++    {
++        return $query->where('type', $type);
++    }
++}
+diff --git a/app/Services/StockAggregator.php b/app/Services/StockAggregator.php
+new file mode 100644
+index 0000000..6a89011
+--- /dev/null
++++ b/app/Services/StockAggregator.php
+@@ -0,0 +1,25 @@
++<?php
++
++namespace App\Services;
++
++use App\Models\StockSource;
++use App\Services\StockProviders\StockProviderFactory;
++use App\Support\Stock\StockResult;
++use Illuminate\Support\Collection;
++
++class StockAggregator
++{
++    public function __construct(private readonly StockProviderFactory $factory) {}
++
++    /**
++     * @return Collection<int, StockResult>
++     */
++    public function lookup(string $ean): Collection
++    {
++        return StockSource::query()
++            ->active()
++            ->get()
++            ->map(fn (StockSource $source) => $this->factory->make($source)->getStockByEan($ean))
++            ->values();
++    }
++}
+diff --git a/app/Services/StockProviders/BolComStockProvider.php b/app/Services/StockProviders/BolComStockProvider.php
+new file mode 100644
+index 0000000..5f6a646
+--- /dev/null
++++ b/app/Services/StockProviders/BolComStockProvider.php
+@@ -0,0 +1,96 @@
++<?php
++
++namespace App\Services\StockProviders;
++
++use App\Contracts\StockProvider;
++use App\Models\StockSource;
++use App\Support\Stock\StockResult;
++use Illuminate\Support\Facades\Cache;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * NOTE: verify the exact endpoint/version against the current Bol.com
++ * Retailer API docs (https://api.bol.com/retailer/public/Retailer-API/)
++ * before going live -- the offers-by-EAN endpoint and API version header
++ * have changed between releases. Adjust API_BASE / the Accept header
++ * version and the offers[] shape below if needed; the OAuth2 token flow
++ * itself is stable.
++ */
++class BolComStockProvider implements StockProvider
++{
++    private const TOKEN_URL = 'https://login.bol.com/token?grant_type=client_credentials';
++
++    private const API_BASE = 'https://api.bol.com/retailer';
++
++    public function __construct(private readonly StockSource $source) {}
++
++    public function key(): string
++    {
++        return "bol_com:{$this->source->id}";
++    }
++
++    public function label(): string
++    {
++        return $this->source->label;
++    }
++
++    public function getStockByEan(string $ean): StockResult
++    {
++        try {
++            $token = $this->getAccessToken();
++
++            $response = Http::withToken($token)
++                ->withHeaders(['Accept' => 'application/vnd.retailer.v10+json'])
++                ->timeout(5)
++                ->get(self::API_BASE.'/offers', ['ean' => $ean]);
++
++            if ($response->status() === 404) {
++                return StockResult::notFound($this->key(), $this->label());
++            }
++
++            if ($response->failed()) {
++                return StockResult::failed($this->key(), $this->label(), "HTTP {$response->status()}");
++            }
++
++            $offers = $response->json('offers', []);
++
++            if (empty($offers)) {
++                return StockResult::notFound($this->key(), $this->label());
++            }
++
++            $offer = $offers[0];
++
++            return new StockResult(
++                sourceKey: $this->key(),
++                sourceLabel: $this->label(),
++                found: true,
++                quantity: isset($offer['stock']['amount']) ? (float) $offer['stock']['amount'] : null,
++                sku: $offer['reference'] ?? null,
++                externalId: $offer['offerId'] ?? null,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key(), $this->label(), $e->getMessage());
++        }
++    }
++
++    private function getAccessToken(): string
++    {
++        return Cache::remember(
++            "bol_com:token:{$this->source->id}",
++            now()->addMinutes(4),
++            function () {
++                $credentials = $this->source->credentials ?? [];
++
++                $response = Http::asForm()
++                    ->withBasicAuth($credentials['client_id'] ?? '', $credentials['client_secret'] ?? '')
++                    ->timeout(5)
++                    ->post(self::TOKEN_URL);
++
++                $response->throw();
++
++                return $response->json('access_token');
++            }
++        );
++    }
++}
+diff --git a/app/Services/StockProviders/OnlinefactStockProvider.php b/app/Services/StockProviders/OnlinefactStockProvider.php
+new file mode 100644
+index 0000000..abb4fcb
+--- /dev/null
++++ b/app/Services/StockProviders/OnlinefactStockProvider.php
+@@ -0,0 +1,71 @@
++<?php
++
++namespace App\Services\StockProviders;
++
++use App\Contracts\StockProvider;
++use App\Models\StockSource;
++use App\Support\Stock\StockResult;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * Onlinefact indexes products natively by barcode, so no local mapping is
++ * needed here (unlike WooCommerce). See products.php `barcode` attribute
++ * in the Onlinefact API documentation.
++ */
++class OnlinefactStockProvider implements StockProvider
++{
++    private const BASE_URL = 'https://api.onlinefact.be/products.php';
++
++    public function __construct(private readonly StockSource $source) {}
++
++    public function key(): string
++    {
++        return "onlinefact:{$this->source->id}";
++    }
++
++    public function label(): string
++    {
++        return $this->source->label;
++    }
++
++    public function getStockByEan(string $ean): StockResult
++    {
++        try {
++            $credentials = $this->source->credentials ?? [];
++
++            $response = Http::withBasicAuth(
++                $credentials['api_key'] ?? '',
++                $credentials['api_secret'] ?? '',
++            )
++                ->timeout(5)
++                ->get(self::BASE_URL, [
++                    'barcode' => $ean,
++                    'fields' => 'product_id,reference,barcode,description,stock',
++                ]);
++
++            if ($response->failed()) {
++                return StockResult::failed($this->key(), $this->label(), "HTTP {$response->status()}");
++            }
++
++            $payload = $response->json();
++
++            if (! ($payload['succes'] ?? false) || empty($payload['results'])) {
++                return StockResult::notFound($this->key(), $this->label());
++            }
++
++            $product = $payload['results'][0];
++
++            return new StockResult(
++                sourceKey: $this->key(),
++                sourceLabel: $this->label(),
++                found: true,
++                quantity: isset($product['stock']) ? (float) $product['stock'] : null,
++                sku: $product['reference'] ?? null,
++                externalId: $product['product_id'] ?? null,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key(), $this->label(), $e->getMessage());
++        }
++    }
++}
+diff --git a/app/Services/StockProviders/StockProviderFactory.php b/app/Services/StockProviders/StockProviderFactory.php
+new file mode 100644
+index 0000000..1672de6
+--- /dev/null
++++ b/app/Services/StockProviders/StockProviderFactory.php
+@@ -0,0 +1,19 @@
++<?php
++
++namespace App\Services\StockProviders;
++
++use App\Contracts\StockProvider;
++use App\Enums\StockSourceType;
++use App\Models\StockSource;
++
++class StockProviderFactory
++{
++    public function make(StockSource $source): StockProvider
++    {
++        return match ($source->type) {
++            StockSourceType::WooCommerce => new WooCommerceStockProvider($source),
++            StockSourceType::BolCom => new BolComStockProvider($source),
++            StockSourceType::Onlinefact => new OnlinefactStockProvider($source),
++        };
++    }
++}
+diff --git a/app/Services/StockProviders/WooCommerceStockProvider.php b/app/Services/StockProviders/WooCommerceStockProvider.php
+new file mode 100644
+index 0000000..f43b393
+--- /dev/null
++++ b/app/Services/StockProviders/WooCommerceStockProvider.php
+@@ -0,0 +1,75 @@
++<?php
++
++namespace App\Services\StockProviders;
++
++use App\Contracts\StockProvider;
++use App\Models\ProductEanMap;
++use App\Models\StockSource;
++use App\Support\Stock\StockResult;
++use Illuminate\Support\Facades\Http;
++use Throwable;
++
++/**
++ * WooCommerce's core REST API cannot filter products by an arbitrary custom
++ * meta field (EAN is almost always stored as custom/plugin meta, not the
++ * built-in `sku`). So lookups go through a locally synced EAN -> product ID
++ * map (see App\Jobs\SyncWooCommerceCatalog) and only the final stock figure
++ * is fetched live, since that changes far more often than the catalog itself.
++ */
++class WooCommerceStockProvider implements StockProvider
++{
++    public function __construct(private readonly StockSource $source) {}
++
++    public function key(): string
++    {
++        return "woocommerce:{$this->source->id}";
++    }
++
++    public function label(): string
++    {
++        return $this->source->label;
++    }
++
++    public function getStockByEan(string $ean): StockResult
++    {
++        $map = ProductEanMap::query()
++            ->where('stock_source_id', $this->source->id)
++            ->where('ean', $ean)
++            ->first();
++
++        if (! $map) {
++            return StockResult::notFound($this->key(), $this->label());
++        }
++
++        try {
++            $credentials = $this->source->credentials ?? [];
++
++            $response = Http::withBasicAuth(
++                $credentials['consumer_key'] ?? '',
++                $credentials['consumer_secret'] ?? '',
++            )
++                ->timeout(5)
++                ->get(
++                    rtrim((string) $this->source->base_url, '/')."/wp-json/wc/v3/products/{$map->external_product_id}",
++                    ['_fields' => 'id,sku,stock_quantity,manage_stock']
++                );
++
++            if ($response->failed()) {
++                return StockResult::failed($this->key(), $this->label(), "HTTP {$response->status()}");
++            }
++
++            $product = $response->json();
++
++            return new StockResult(
++                sourceKey: $this->key(),
++                sourceLabel: $this->label(),
++                found: true,
++                quantity: isset($product['stock_quantity']) ? (float) $product['stock_quantity'] : null,
++                sku: $product['sku'] ?? $map->sku,
++                externalId: (string) $map->external_product_id,
++            );
++        } catch (Throwable $e) {
++            return StockResult::failed($this->key(), $this->label(), $e->getMessage());
++        }
++    }
++}
+diff --git a/app/Support/Stock/StockResult.php b/app/Support/Stock/StockResult.php
+new file mode 100644
+index 0000000..b34c41e
+--- /dev/null
++++ b/app/Support/Stock/StockResult.php
+@@ -0,0 +1,26 @@
++<?php
++
++namespace App\Support\Stock;
++
++final readonly class StockResult
++{
++    public function __construct(
++        public string $sourceKey,
++        public string $sourceLabel,
++        public bool $found,
++        public ?float $quantity = null,
++        public ?string $sku = null,
++        public ?string $externalId = null,
++        public ?string $error = null,
++    ) {}
++
++    public static function notFound(string $sourceKey, string $sourceLabel): self
++    {
++        return new self($sourceKey, $sourceLabel, found: false);
++    }
++
++    public static function failed(string $sourceKey, string $sourceLabel, string $error): self
++    {
++        return new self($sourceKey, $sourceLabel, found: false, error: $error);
++    }
++}
+diff --git a/database/factories/ProductEanMapFactory.php b/database/factories/ProductEanMapFactory.php
+new file mode 100644
+index 0000000..52096b8
+--- /dev/null
++++ b/database/factories/ProductEanMapFactory.php
+@@ -0,0 +1,26 @@
++<?php
++
++namespace Database\Factories;
++
++use App\Models\ProductEanMap;
++use App\Models\StockSource;
++use Illuminate\Database\Eloquent\Factories\Factory;
++
++/**
++ * @extends Factory<ProductEanMap>
++ */
++class ProductEanMapFactory extends Factory
++{
++    protected $model = ProductEanMap::class;
++
++    public function definition(): array
++    {
++        return [
++            'stock_source_id' => StockSource::factory()->woocommerce(),
++            'ean' => fake()->ean13(),
++            'external_product_id' => (string) fake()->randomNumber(5),
++            'sku' => fake()->bothify('SKU-####'),
++            'last_synced_at' => now(),
++        ];
++    }
++}
+diff --git a/database/factories/StockSourceFactory.php b/database/factories/StockSourceFactory.php
+new file mode 100644
+index 0000000..76824c5
+--- /dev/null
++++ b/database/factories/StockSourceFactory.php
+@@ -0,0 +1,69 @@
++<?php
++
++namespace Database\Factories;
++
++use App\Enums\StockSourceType;
++use App\Models\StockSource;
++use Illuminate\Database\Eloquent\Factories\Factory;
++
++/**
++ * @extends Factory<StockSource>
++ */
++class StockSourceFactory extends Factory
++{
++    protected $model = StockSource::class;
++
++    public function definition(): array
++    {
++        return [
++            'type' => StockSourceType::Onlinefact,
++            'label' => fake()->company(),
++            'is_active' => true,
++            'credentials' => [],
++            'base_url' => null,
++            'meta' => [],
++        ];
++    }
++
++    public function woocommerce(): static
++    {
++        return $this->state(fn () => [
++            'type' => StockSourceType::WooCommerce,
++            'base_url' => fake()->url(),
++            'credentials' => [
++                'consumer_key' => 'ck_'.fake()->uuid(),
++                'consumer_secret' => 'cs_'.fake()->uuid(),
++            ],
++            'meta' => ['ean_meta_key' => '_ean'],
++        ]);
++    }
++
++    public function bolCom(): static
++    {
++        return $this->state(fn () => [
++            'type' => StockSourceType::BolCom,
++            'base_url' => null,
++            'credentials' => [
++                'client_id' => fake()->uuid(),
++                'client_secret' => fake()->uuid(),
++            ],
++        ]);
++    }
++
++    public function onlinefact(): static
++    {
++        return $this->state(fn () => [
++            'type' => StockSourceType::Onlinefact,
++            'base_url' => null,
++            'credentials' => [
++                'api_key' => fake()->uuid(),
++                'api_secret' => fake()->uuid(),
++            ],
++        ]);
++    }
++
++    public function inactive(): static
++    {
++        return $this->state(fn () => ['is_active' => false]);
++    }
++}
+diff --git a/database/migrations/2026_08_15_100000_create_stock_sources_table.php b/database/migrations/2026_08_15_100000_create_stock_sources_table.php
+new file mode 100644
+index 0000000..883bab8
+--- /dev/null
++++ b/database/migrations/2026_08_15_100000_create_stock_sources_table.php
+@@ -0,0 +1,29 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('stock_sources', function (Blueprint $table) {
++            $table->id();
++            $table->string('type', 32); // backed by App\Enums\StockSourceType
++            $table->string('label');
++            $table->boolean('is_active')->default(true);
++            $table->text('credentials')->nullable(); // encrypted json: consumer_key/secret, client_id/secret, api_key/secret...
++            $table->string('base_url')->nullable(); // per-shop base URL, only used by WooCommerce
++            $table->json('meta')->nullable(); // per-source extra settings, e.g. ean_meta_key for WooCommerce
++            $table->timestamps();
++
++            $table->index(['type', 'is_active']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('stock_sources');
++    }
++};
+diff --git a/database/migrations/2026_08_15_100001_create_product_ean_maps_table.php b/database/migrations/2026_08_15_100001_create_product_ean_maps_table.php
+new file mode 100644
+index 0000000..c74d088
+--- /dev/null
++++ b/database/migrations/2026_08_15_100001_create_product_ean_maps_table.php
+@@ -0,0 +1,28 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('product_ean_maps', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('stock_source_id')->constrained()->cascadeOnDelete();
++            $table->string('ean');
++            $table->string('external_product_id');
++            $table->string('sku')->nullable();
++            $table->timestamp('last_synced_at')->nullable();
++            $table->timestamps();
++
++            $table->unique(['stock_source_id', 'ean']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('product_ean_maps');
++    }
++};
+diff --git a/resources/views/layouts/app/sidebar.blade.php b/resources/views/layouts/app/sidebar.blade.php
+index 6db2170..74dba1c 100644
+--- a/resources/views/layouts/app/sidebar.blade.php
++++ b/resources/views/layouts/app/sidebar.blade.php
+@@ -15,6 +15,10 @@
+                     <flux:sidebar.item icon="home" :href="route('dashboard')" :current="request()->routeIs('dashboard')" wire:navigate>
+                         {{ __('Dashboard') }}
+                     </flux:sidebar.item>
++
++                    <flux:sidebar.item icon="archive-box" :href="route('stock-lookup')" :current="request()->routeIs('stock-lookup')" wire:navigate>
++                        {{ __('Stock lookup') }}
++                    </flux:sidebar.item>
+                 </flux:sidebar.group>
+             </flux:sidebar.nav>
+ 
+diff --git a/resources/views/livewire/stock-lookup.blade.php b/resources/views/livewire/stock-lookup.blade.php
+new file mode 100644
+index 0000000..f382dcf
+--- /dev/null
++++ b/resources/views/livewire/stock-lookup.blade.php
+@@ -0,0 +1,76 @@
++<div class="flex flex-col gap-6">
++    <div>
++        <flux:heading size="xl">{{ __('Stock lookup') }}</flux:heading>
++        <flux:subheading>{{ __('Compare stock levels across all connected sources for a single EAN.') }}</flux:subheading>
++    </div>
++
++    <form wire:submit="search" class="flex items-end gap-3">
++        <flux:input
++            wire:model="ean"
++            label="{{ __('EAN / barcode') }}"
++            placeholder="6937186640697"
++            autofocus
++            class="max-w-xs"
++        />
++
++        <flux:button
++            type="submit"
++            variant="primary"
++            icon="magnifying-glass"
++            wire:loading.attr="disabled"
++            wire:target="search"
++        >
++            {{ __('Search') }}
++        </flux:button>
++    </form>
++
++    @if ($searched)
++        <div class="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700">
++            <table class="w-full text-start text-sm">
++                <thead class="bg-zinc-50 text-xs uppercase text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
++                    <tr>
++                        <th class="px-4 py-3 text-start">{{ __('Source') }}</th>
++                        <th class="px-4 py-3 text-start">{{ __('Status') }}</th>
++                        <th class="px-4 py-3 text-start">{{ __('Stock') }}</th>
++                        <th class="px-4 py-3 text-start">{{ __('SKU / reference') }}</th>
++                    </tr>
++                </thead>
++                <tbody class="divide-y divide-zinc-200 dark:divide-zinc-700">
++                    @forelse ($results as $result)
++                        <tr wire:key="{{ $result->sourceKey }}">
++                            <td class="px-4 py-3 font-medium">{{ $result->sourceLabel }}</td>
++                            <td class="px-4 py-3">
++                                @if ($result->error)
++                                    <flux:badge color="red" size="sm">{{ __('Error') }}</flux:badge>
++                                @elseif (! $result->found)
++                                    <flux:badge color="zinc" size="sm">{{ __('Not found') }}</flux:badge>
++                                @else
++                                    <flux:badge color="green" size="sm">{{ __('OK') }}</flux:badge>
++                                @endif
++                            </td>
++                            <td class="px-4 py-3">
++                                @if ($result->quantity !== null)
++                                    {{ rtrim(rtrim(number_format($result->quantity, 2, '.', ''), '0'), '.') }}
++                                @else
++                                    &mdash;
++                                @endif
++                            </td>
++                            <td class="px-4 py-3 text-zinc-500 dark:text-zinc-400">
++                                {{ $result->sku ?? '—' }}
++                                @if ($result->error)
++                                    <div class="text-xs text-red-500">{{ $result->error }}</div>
++                                @endif
++                            </td>
++                        </tr>
++                    @empty
++                        <tr>
++                            <td colspan="4" class="px-4 py-6 text-center text-zinc-500 dark:text-zinc-400">
++                                {{ __('No stock sources are configured yet.') }}
++                            </td>
++                        </tr>
++                    @endforelse
++                </tbody>
++            </table>
++        </div>
++    @endif
++</div>
+diff --git a/routes/console.php b/routes/console.php
+index 3c9adf1..371c2c3 100644
+--- a/routes/console.php
++++ b/routes/console.php
+@@ -1,8 +1,19 @@
+ <?php
+ 
++use App\Enums\StockSourceType;
++use App\Jobs\SyncWooCommerceCatalog;
++use App\Models\StockSource;
+ use Illuminate\Foundation\Inspiring;
+ use Illuminate\Support\Facades\Artisan;
++use Illuminate\Support\Facades\Schedule;
+ 
+ Artisan::command('inspire', function () {
+     $this->comment(Inspiring::quote());
+ })->purpose('Display an inspiring quote');
++
++Schedule::call(function () {
++    StockSource::query()
++        ->active()
++        ->ofType(StockSourceType::WooCommerce)
++        ->each(fn (StockSource $source) => SyncWooCommerceCatalog::dispatch($source));
++})->hourly()->name('sync-woocommerce-catalogs')->withoutOverlapping();
+diff --git a/routes/web.php b/routes/web.php
+index 12e932e..aa05a60 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -1,11 +1,14 @@
+ <?php
+ 
++use App\Livewire\StockLookup;
+ use Illuminate\Support\Facades\Route;
+ 
+ Route::view('/', 'welcome')->name('home');
+ 
+ Route::middleware(['auth', 'verified'])->group(function () {
+     Route::view('dashboard', 'dashboard')->name('dashboard');
++
++    Route::livewire('stock-lookup', StockLookup::class)->name('stock-lookup');
+ });
+ 
+ require __DIR__.'/settings.php';
+diff --git a/tests/Feature/BolComStockProviderTest.php b/tests/Feature/BolComStockProviderTest.php
+new file mode 100644
+index 0000000..69d651e
+--- /dev/null
++++ b/tests/Feature/BolComStockProviderTest.php
+@@ -0,0 +1,42 @@
++<?php
++
++use App\Models\StockSource;
++use App\Services\StockProviders\BolComStockProvider;
++use Illuminate\Support\Facades\Http;
++
++it('exchanges credentials for a token then fetches the offer by ean', function () {
++    Http::fake([
++        'login.bol.com/*' => Http::response(['access_token' => 'test-token', 'expires_in' => 300]),
++        'api.bol.com/retailer/offers*' => Http::response([
++            'offers' => [
++                ['offerId' => 'abc-123', 'reference' => 'SKU-1', 'stock' => ['amount' => 5]],
++            ],
++        ]),
++    ]);
++
++    $source = StockSource::factory()->bolCom()->create();
++    $provider = new BolComStockProvider($source);
++
++    $result = $provider->getStockByEan('6937186640697');
++
++    expect($result->found)->toBeTrue()
++        ->and($result->quantity)->toBe(5.0)
++        ->and($result->externalId)->toBe('abc-123');
++
++    Http::assertSentCount(2);
++});
++
++it('returns not found when bol.com has no offers for the ean', function () {
++    Http::fake([
++        'login.bol.com/*' => Http::response(['access_token' => 'test-token']),
++        'api.bol.com/retailer/offers*' => Http::response(['offers' => []]),
++    ]);
++
++    $source = StockSource::factory()->bolCom()->create();
++    $provider = new BolComStockProvider($source);
++
++    $result = $provider->getStockByEan('0000000000000');
++
++    expect($result->found)->toBeFalse()
++        ->and($result->error)->toBeNull();
++});
+diff --git a/tests/Feature/OnlinefactStockProviderTest.php b/tests/Feature/OnlinefactStockProviderTest.php
+new file mode 100644
+index 0000000..b4959fa
+--- /dev/null
++++ b/tests/Feature/OnlinefactStockProviderTest.php
+@@ -0,0 +1,55 @@
++<?php
++
++use App\Models\StockSource;
++use App\Services\StockProviders\OnlinefactStockProvider;
++use Illuminate\Support\Facades\Http;
++
++it('returns stock when the product is found', function () {
++    Http::fake([
++        'api.onlinefact.be/*' => Http::response([
++            'results' => [
++                ['product_id' => '3', 'reference' => 'JUPILER25CL', 'barcode' => '6937186640697', 'stock' => '12.00'],
++            ],
++            'succes' => 1,
++            'resultcount' => 1,
++        ]),
++    ]);
++
++    $source = StockSource::factory()->onlinefact()->create();
++    $provider = new OnlinefactStockProvider($source);
++
++    $result = $provider->getStockByEan('6937186640697');
++
++    expect($result->found)->toBeTrue()
++        ->and($result->quantity)->toBe(12.0)
++        ->and($result->sku)->toBe('JUPILER25CL')
++        ->and($result->error)->toBeNull();
++});
++
++it('returns not found when onlinefact has no results', function () {
++    Http::fake([
++        'api.onlinefact.be/*' => Http::response(['results' => [], 'succes' => 1, 'resultcount' => 0]),
++    ]);
++
++    $source = StockSource::factory()->onlinefact()->create();
++    $provider = new OnlinefactStockProvider($source);
++
++    $result = $provider->getStockByEan('0000000000000');
++
++    expect($result->found)->toBeFalse()
++        ->and($result->error)->toBeNull();
++});
++
++it('returns a failed result instead of throwing on http errors', function () {
++    Http::fake([
++        'api.onlinefact.be/*' => Http::response(status: 500),
++    ]);
++
++    $source = StockSource::factory()->onlinefact()->create();
++    $provider = new OnlinefactStockProvider($source);
++
++    $result = $provider->getStockByEan('6937186640697');
++
++    expect($result->found)->toBeFalse()
++        ->and($result->error)->not->toBeNull();
++});
+diff --git a/tests/Feature/StockLookupTest.php b/tests/Feature/StockLookupTest.php
+new file mode 100644
+index 0000000..069516c
+--- /dev/null
++++ b/tests/Feature/StockLookupTest.php
+@@ -0,0 +1,42 @@
++<?php
++
++use App\Livewire\StockLookup;
++use App\Models\StockSource;
++use App\Models\User;
++use Illuminate\Support\Facades\Http;
++use Livewire\Livewire;
++
++it('requires authentication', function () {
++    $this->get(route('stock-lookup'))->assertRedirect(route('login'));
++});
++
++it('aggregates results from every active source', function () {
++    Http::fake([
++        'api.onlinefact.be/*' => Http::response([
++            'results' => [['product_id' => '3', 'reference' => 'JUPILER25CL', 'stock' => '4.00']],
++            'succes' => 1,
++        ]),
++    ]);
++
++    $user = User::factory()->create();
++    StockSource::factory()->onlinefact()->create(['label' => 'Onlinefact ERP']);
++    StockSource::factory()->onlinefact()->inactive()->create(['label' => 'Disabled source']);
++
++    Livewire::actingAs($user)
++        ->test(StockLookup::class)
++        ->set('ean', '6937186640697')
++        ->call('search')
++        ->assertSet('searched', true)
++        ->assertSee('Onlinefact ERP')
++        ->assertDontSee('Disabled source');
++});
++
++it('validates the ean before searching', function () {
++    $user = User::factory()->create();
++
++    Livewire::actingAs($user)
++        ->test(StockLookup::class)
++        ->set('ean', 'abc')
++        ->call('search')
++        ->assertHasErrors(['ean']);
++});
+diff --git a/tests/Feature/WooCommerceStockProviderTest.php b/tests/Feature/WooCommerceStockProviderTest.php
+new file mode 100644
+index 0000000..c2db07f
+--- /dev/null
++++ b/tests/Feature/WooCommerceStockProviderTest.php
+@@ -0,0 +1,43 @@
++<?php
++
++use App\Models\ProductEanMap;
++use App\Models\StockSource;
++use App\Services\StockProviders\WooCommerceStockProvider;
++use Illuminate\Support\Facades\Http;
++
++it('returns not found without hitting the api when no local ean map exists', function () {
++    Http::fake();
++
++    $source = StockSource::factory()->woocommerce()->create();
++    $provider = new WooCommerceStockProvider($source);
++
++    $result = $provider->getStockByEan('6937186640697');
++
++    expect($result->found)->toBeFalse();
++    Http::assertNothingSent();
++});
++
++it('fetches live stock for a mapped product', function () {
++    $source = StockSource::factory()->woocommerce()->create(['base_url' => 'https://shop-a.example.com']);
++
++    ProductEanMap::factory()->create([
++        'stock_source_id' => $source->id,
++        'ean' => '6937186640697',
++        'external_product_id' => '42',
++        'sku' => 'JUPILER25CL',
++    ]);
++
++    Http::fake([
++        'shop-a.example.com/wp-json/wc/v3/products/42*' => Http::response([
++            'id' => 42,
++            'sku' => 'JUPILER25CL',
++            'stock_quantity' => 7,
++        ]),
++    ]);
++
++    $result = $provider->getStockByEan('6937186640697');
++
++    expect($result->found)->toBeTrue()
++        ->and($result->quantity)->toBe(7.0)
++        ->and($result->externalId)->toBe('42');
++});
+-- 
+2.43.0
+
