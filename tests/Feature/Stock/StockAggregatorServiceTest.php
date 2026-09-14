@@ -236,5 +236,5 @@ it('renders the Onlinefact product details above the source comparison', functio
         ->assertSee('DISNEY - Woody - Nutcracker Orn')
         ->assertSee('CIDN68010')
         ->assertSee('CHRISTMASINSPIRATIONS BV')
-        ->assertSee('Prices');
+        ->assertSee('Prijzen');
 });
