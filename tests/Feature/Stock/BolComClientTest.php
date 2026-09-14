@@ -1,6 +1,7 @@
 <?php
 
 use App\Services\Stock\Clients\BolComClient;
+use App\Services\Stock\DTO\StockResult;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
@@ -75,7 +76,7 @@ it('prefers the configured channel EAN from the ERP master result', function () 
         'shop' => 'koraly',
     ]);
 
-    $master = new \App\Services\Stock\DTO\StockResult(
+    $master = new StockResult(
         sourceKey: 'onlinefact',
         sourceLabel: 'Onlinefact',
         group: 'ERP',

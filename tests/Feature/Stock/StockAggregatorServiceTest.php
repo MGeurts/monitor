@@ -1,10 +1,10 @@
 <?php
 
+use App\Livewire\Stock\EanLookup;
 use App\Services\Stock\Clients\OnlinefactClient;
 use App\Services\Stock\Clients\WooCommerceClient;
 use App\Services\Stock\SourceRegistry;
 use App\Services\Stock\StockAggregatorService;
-use App\Livewire\Stock\EanLookup;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Livewire\Livewire;

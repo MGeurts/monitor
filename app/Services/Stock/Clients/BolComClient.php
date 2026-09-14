@@ -4,9 +4,9 @@ namespace App\Services\Stock\Clients;
 
 use App\Services\Stock\Contracts\StockSourceClient;
 use App\Services\Stock\DTO\StockResult;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
