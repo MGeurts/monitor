@@ -2,8 +2,8 @@
 
 This adds two pages to the app:
 
-- **EAN lookup** (`/stock/lookup`) — enter one EAN, see stock across every source, side by side.
-- **Batch comparison** (`/stock/batch`) — launch a run over all ERP EANs (or a pasted list) and watch
+- **Product lookup** (`/stock/lookup`) — enter an ERP reference or barcode, see stock across every source, side by side.
+- **Batch lookup** (`/stock/batch`) — launch a run over all ERP EANs (or a pasted list) and watch
   results stream in live while a queue worker processes them.
 
 ## What was added

@@ -58,6 +58,26 @@ class OnlinefactClient implements StockSourceClient
             $body = $response->json();
             $results = $body['results'] ?? [];
 
+            // The same endpoint accepts the ERP product reference. This makes
+            // the product lookup useful when a user starts from a WooCommerce
+            // SKU rather than a barcode.
+            $lookupMethod = 'barcode';
+
+            if (empty($results)) {
+                $referenceResponse = Http::withBasicAuth($this->apiKey, $this->apiSecret)
+                    ->timeout(15)
+                    ->get("{$this->baseUrl}/products.php", [
+                        'reference' => $ean,
+                        'fields' => 'product_id,reference,barcode,description,pricenetto,stock,categorie_id',
+                    ]);
+
+                if ($referenceResponse->successful()) {
+                    $body = $referenceResponse->json();
+                    $results = $body['results'] ?? [];
+                    $lookupMethod = 'reference';
+                }
+            }
+
             if (empty($results)) {
                 return StockResult::notFound($this->key, $this->label, 'ERP');
             }
@@ -107,6 +127,7 @@ class OnlinefactClient implements StockSourceClient
                         'price incl 3', 'bol koraly', 'price bol koraly', 'bol koraly price', 'prijs bol koraly',
                     ]),
                     'api_response' => [
+                        'lookup_method' => $lookupMethod,
                         'barcode_lookup' => $body,
                         'product_details' => $details,
                     ],

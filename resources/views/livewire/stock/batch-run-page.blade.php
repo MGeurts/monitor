@@ -4,7 +4,7 @@
 >
         <div class="flex flex-wrap items-center justify-between gap-4">
             <div>
-                <flux:heading size="xl">{{ __('Batch stock comparison') }}</flux:heading>
+                <flux:heading size="xl">{{ __('Batch lookup') }}</flux:heading>
                 <flux:text class="mt-1">
                     {{ __('Check every EAN in one go and watch results come in live.') }}
                 </flux:text>

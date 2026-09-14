@@ -106,6 +106,7 @@ class BolComClient implements StockSourceClient
                 tookMs: $tookMs,
                 metadata: [
                     'shop' => $this->shop,
+                    'ean' => $ean,
                     'api_response' => [...$body, 'offers' => $offers],
                 ],
             );
@@ -243,6 +244,7 @@ class BolComClient implements StockSourceClient
             tookMs: $tookMs,
             metadata: [
                 'shop' => $this->shop,
+                'ean' => $ean,
                 'api_response' => [...$body, 'offers' => $offers],
             ],
         );

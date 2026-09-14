@@ -7,7 +7,7 @@ use App\Services\Stock\StockAggregatorService;
 use Livewire\Attributes\Title;
 use Livewire\Component;
 
-#[Title('EAN stock lookup')]
+#[Title('Product opzoeken')]
 class EanLookup extends Component
 {
     public string $ean = '';
@@ -60,6 +60,10 @@ class EanLookup extends Component
             'ean' => ['required', 'string', 'min:6', 'max:32'],
         ]);
 
+        // Clear the previous product before the request starts. The Blade view
+        // also removes the result card client-side while this action is loading.
+        $this->check = null;
+        $this->closeApiResponse();
         $this->searching = true;
 
         $result = $aggregator->check($this->ean);

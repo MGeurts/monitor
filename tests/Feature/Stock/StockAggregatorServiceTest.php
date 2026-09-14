@@ -120,6 +120,36 @@ it('uses the ERP reference as WooCommerce SKU when the EAN is not indexed there'
     });
 });
 
+it('resolves an entered ERP reference before querying the other sources', function () {
+    Http::fake(function (Request $request) {
+        if (str_contains($request->url(), '/products.php')) {
+            parse_str(parse_url($request->url(), PHP_URL_QUERY) ?: '', $query);
+
+            return Http::response([
+                'results' => ($query['reference'] ?? null) === 'CIDN68010' ? [[
+                    'product_id' => 3,
+                    'reference' => 'CIDN68010',
+                    'barcode' => '086131571985',
+                    'stock' => '33',
+                ]] : [],
+            ]);
+        }
+
+        return Http::response([]);
+    });
+
+    $check = app(StockAggregatorService::class)->check('CIDN68010');
+
+    expect($check['ean'])->toBe('086131571985');
+
+    Http::assertSent(function (Request $request) {
+        parse_str(parse_url($request->url(), PHP_URL_QUERY) ?: '', $query);
+
+        return str_contains($request->url(), '/products.php')
+            && ($query['reference'] ?? null) === 'CIDN68010';
+    });
+});
+
 it('exposes Onlinefact-specific EAN and BOL price fields when the ERP returns them', function () {
     Http::fake(function (Request $request) {
         if (str_contains($request->url(), '/products.php')) {

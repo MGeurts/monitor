@@ -85,7 +85,7 @@ return [
         ],
 
         'bol_koraly_be' => [
-            'label' => 'Koraly BV BE (bol.com)',
+            'label' => 'Koraly BV BE',
             'group' => 'Bol.com',
             'type' => 'bol',
             'driver' => BolComClient::class,
@@ -96,7 +96,7 @@ return [
         ],
 
         'bol_koraly_nl' => [
-            'label' => 'Koraly BV NL (bol.com)',
+            'label' => 'Koraly BV NL',
             'group' => 'Bol.com',
             'type' => 'bol',
             'driver' => BolComClient::class,
@@ -107,7 +107,7 @@ return [
         ],
 
         'bol_outlet_elektro_be' => [
-            'label' => 'Exellent Electro Riemst BE (bol.com)',
+            'label' => 'Exellent Electro Riemst BE',
             'group' => 'Bol.com',
             'type' => 'bol',
             'driver' => BolComClient::class,
@@ -118,7 +118,7 @@ return [
         ],
 
         'bol_outlet_elektro_nl' => [
-            'label' => 'Exellent Electro Riemst NL (bol.com)',
+            'label' => 'Exellent Electro Riemst NL',
             'group' => 'Bol.com',
             'type' => 'bol',
             'driver' => BolComClient::class,

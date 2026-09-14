@@ -35,6 +35,11 @@ class StockAggregatorService
             ?? throw new \RuntimeException("Master source [{$masterKey}] is not configured.");
         $master = $masterClient->getStock($ean);
         $reference = $master->found ? $master->sku : null;
+        // A reference can be entered in the lookup field. Once ERP resolved
+        // it, all downstream APIs must receive the product's actual barcode.
+        $resolvedEan = $master->found && filled($master->metadata['barcode'] ?? null)
+            ? trim((string) $master->metadata['barcode'])
+            : $ean;
 
         /** @var Collection<string, StockResult> $resultsByKey */
         $resultsByKey = collect([$masterKey => $master]);
@@ -47,13 +52,13 @@ class StockAggregatorService
             $started = microtime(true);
             $responses = Http::pool(
                 fn (Pool $pool) => $wooClients->flatMap(
-                    fn (WooCommerceClient $client) => $client->addPoolRequests($pool, $ean, $reference)
+                    fn (WooCommerceClient $client) => $client->addPoolRequests($pool, $resolvedEan, $reference)
                 )->all(),
                 concurrency: max(1, $wooClients->count() * 5),
             );
 
-            $wooClients->each(function (WooCommerceClient $client, string $key) use ($responses, $ean, $reference, $started, &$resultsByKey) {
-                $resultsByKey->put($key, $client->resultFromPool($responses, $ean, $reference, $started));
+            $wooClients->each(function (WooCommerceClient $client, string $key) use ($responses, $resolvedEan, $reference, $started, &$resultsByKey) {
+                $resultsByKey->put($key, $client->resultFromPool($responses, $resolvedEan, $reference, $started));
             });
         }
 
@@ -63,7 +68,7 @@ class StockAggregatorService
 
         if ($bolClients->isNotEmpty()) {
             $bolLookupEans = $bolClients->map(
-                fn (BolComClient $client) => $client->lookupEan($master, $ean)
+                fn (BolComClient $client) => $client->lookupEan($master, $resolvedEan)
             );
             $tokens = $bolClients->map(fn (BolComClient $client) => $client->cachedToken());
             $missingTokens = $bolClients->filter(fn (BolComClient $client, string $key) => blank($tokens->get($key)));
@@ -103,9 +108,9 @@ class StockAggregatorService
 
         // Keep support for additional future source types without including
         // them in either of the specialised request pools above.
-        $clients->each(function ($client, string $key) use ($resultsByKey, $ean, $reference) {
+        $clients->each(function ($client, string $key) use ($resultsByKey, $resolvedEan, $reference) {
             if (! $resultsByKey->has($key)) {
-                $resultsByKey->put($key, $client->getStock($ean, $reference));
+                $resultsByKey->put($key, $client->getStock($resolvedEan, $reference));
             }
         });
 
@@ -126,7 +131,7 @@ class StockAggregatorService
         });
 
         return [
-            'ean' => $ean,
+            'ean' => $resolvedEan,
             'master_source' => $masterKey,
             'master_stock' => $masterStock,
             'results' => $withDiff,

@@ -1,8 +1,8 @@
 <div class="flex w-full flex-1 flex-col gap-6">
         <div>
-            <flux:heading size="xl">{{ __('EAN stock lookup') }}</flux:heading>
+            <flux:heading size="xl">{{ __('Product lookup') }}</flux:heading>
             <flux:text class="mt-1">
-                {{ __('Look up a single EAN and compare its stock level across every connected source.') }}
+                {{ __('Look up a product by ERP reference or barcode and compare it across every connected source.') }}
             </flux:text>
         </div>
 
@@ -11,8 +11,8 @@
                 <div class="flex-1">
                     <x-input
                         wire:model="ean"
-                        label="{{ __('EAN / barcode') }}"
-                        placeholder="e.g. 8719505560000"
+                        label="{{ __('Reference or barcode') }}"
+                        placeholder="e.g. CIDN68010 or 8719505560000"
                         autofocus
                         clearable
                     />
@@ -25,6 +25,7 @@
         </x-card>
 
         @if ($check)
+            <div wire:loading.remove wire:target="lookup">
             <x-card>
                 @php
                     $masterResult = collect($check['results'])->firstWhere('is_master', true);
@@ -34,17 +35,47 @@
                         $product['alternative_location'] ?? null,
                     ]));
                     $barcode = trim((string) ($product['barcode'] ?? $check['ean']));
-                    $eanColor = static fn ($value): string => trim((string) $value) === $barcode
+                    $eanColor = static fn ($value): string => blank($value)
+                        ? ''
+                        : (trim((string) $value) === $barcode
                         ? 'text-green-600 dark:text-green-400'
-                        : 'text-red-600 dark:text-red-400';
+                        : 'text-red-600 dark:text-red-400');
                     $priceColor = static fn ($value, $reference): string => $value !== null && $reference !== null && abs((float) $value - (float) $reference) > 0.004
                         ? 'text-red-600 dark:text-red-400'
                         : '';
+                    $channelPrice = static function (array $result, array $product): ?float {
+                        if ($result['is_master']) {
+                            return null;
+                        }
+
+                        return match (true) {
+                            $result['source_key'] === 'dekookwinkel' => $product['price_incl'] ?? null,
+                            $result['source_key'] === 'koraly', ($result['metadata']['shop'] ?? null) === 'koraly' => $product['price_incl_3'] ?? null,
+                            $result['source_key'] === 'outlet_elektro', ($result['metadata']['shop'] ?? null) === 'outlet_elektro' => $product['price_incl_2'] ?? null,
+                            default => null,
+                        };
+                    };
+                    $allInSync = collect($check['results'])
+                        ->reject(fn (array $result): bool => $result['is_master'])
+                        ->every(function (array $result) use ($channelPrice, $product): bool {
+                            if ($result['error'] || ! $result['found'] || (float) ($result['diff'] ?? 0) !== 0.0) {
+                                return false;
+                            }
+
+                            $expectedPrice = $channelPrice($result, $product);
+
+                            return $expectedPrice === null || ($result['price'] !== null && abs((float) $result['price'] - (float) $expectedPrice) <= 0.004);
+                        });
                 @endphp
 
                 <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
                     <div>
-                        <flux:heading size="lg">{{ $masterResult['description'] ?? $check['ean'] }}</flux:heading>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <flux:heading size="lg">{{ $masterResult['description'] ?? $check['ean'] }}</flux:heading>
+                            @if ($allInSync)
+                                <x-badge text="{{ __('in sync') }}" color="green" sm />
+                            @endif
+                        </div>
                         <flux:text class="mt-1">
                             {{ __('Onlinefact product') }}{{ isset($product['product_id']) ? ' #'.$product['product_id'] : '' }}
                         </flux:text>
@@ -58,15 +89,15 @@
                         <dl class="mt-3 grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                             <div class="sm:col-span-2">
                                 <dt class="text-xs text-zinc-500">{{ __('Description') }}</dt>
-                                <dd class="font-medium text-zinc-900 dark:text-zinc-100">{{ $masterResult['description'] ?? '—' }}</dd>
+                                <dd class="font-semibold text-zinc-900 dark:text-zinc-100">{{ $masterResult['description'] ?? '—' }}</dd>
                             </div>
-                            <div><dt class="text-xs text-zinc-500">{{ __('Reference') }}</dt><dd class="font-medium">{{ $masterResult['sku'] ?? '—' }}</dd></div>
-                            <div><dt class="text-xs text-zinc-500">{{ __('Barcode') }}</dt><dd class="font-medium">{{ $barcode }}</dd></div>
-                            @if (filled($product['ean_koraly'] ?? null))<div><dt class="text-xs text-zinc-500">{{ __('EAN Koraly') }}</dt><dd class="font-medium {{ $eanColor($product['ean_koraly']) }}">{{ $product['ean_koraly'] }}</dd></div>@endif
-                            @if (filled($product['ean_outlet'] ?? null))<div><dt class="text-xs text-zinc-500">{{ __('EAN Outlet') }}</dt><dd class="font-medium {{ $eanColor($product['ean_outlet']) }}">{{ $product['ean_outlet'] }}</dd></div>@endif
-                            @if (filled($product['unit'] ?? null))<div><dt class="text-xs text-zinc-500">{{ __('Unit') }}</dt><dd class="font-medium">{{ $product['unit'] }}</dd></div>@endif
-                            @if (($product['tax'] ?? null) !== null)<div><dt class="text-xs text-zinc-500">{{ __('VAT') }}</dt><dd class="font-medium">{{ rtrim(rtrim(number_format($product['tax'], 2, '.', ''), '0'), '.') }}%</dd></div>@endif
-                            @if (filled($product['supplier'] ?? null))<div class="sm:col-span-2"><dt class="text-xs text-zinc-500">{{ __('Supplier') }}</dt><dd class="font-medium">{{ $product['supplier'] }}</dd></div>@endif
+                            <div><dt class="text-xs text-zinc-500">{{ __('Reference') }}</dt><dd class="font-semibold">{{ $masterResult['sku'] ?? '—' }}</dd></div>
+                            <div><dt class="text-xs text-zinc-500">{{ __('Barcode') }}</dt><dd class="font-semibold">{{ $barcode }}</dd></div>
+                            <div><dt class="text-xs text-zinc-500">{{ __('EAN Koraly') }}</dt><dd class="font-semibold {{ $eanColor($product['ean_koraly'] ?? null) }}">{{ $product['ean_koraly'] ?? '—' }}</dd></div>
+                            <div><dt class="text-xs text-zinc-500">{{ __('EAN Outlet') }}</dt><dd class="font-semibold {{ $eanColor($product['ean_outlet'] ?? null) }}">{{ $product['ean_outlet'] ?? '—' }}</dd></div>
+                            @if (filled($product['unit'] ?? null))<div><dt class="text-xs text-zinc-500">{{ __('Unit') }}</dt><dd class="font-semibold">{{ $product['unit'] }}</dd></div>@endif
+                            @if (($product['tax'] ?? null) !== null)<div><dt class="text-xs text-zinc-500">{{ __('VAT') }}</dt><dd class="font-semibold">{{ rtrim(rtrim(number_format($product['tax'], 2, '.', ''), '0'), '.') }}%</dd></div>@endif
+                            @if (filled($product['supplier'] ?? null))<div class="sm:col-span-2"><dt class="text-xs text-zinc-500">{{ __('Supplier') }}</dt><dd class="font-semibold">{{ $product['supplier'] }}</dd></div>@endif
                         </dl>
                     </section>
 
@@ -83,35 +114,41 @@
 
                 @if (($product['price_incl'] ?? null) !== null || ($product['price_incl_2'] ?? null) !== null || ($product['price_incl_3'] ?? null) !== null)
                     <section class="mb-5 rounded-lg border border-zinc-200 px-4 py-3 text-sm dark:border-zinc-700">
-                        <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+                        <div class="flex flex-wrap items-center gap-y-2" style="column-gap: 4rem; row-gap: 0.5rem;">
                             <span class="font-medium">{{ __('Prices') }}</span>
-                            @if (($product['price_incl'] ?? null) !== null)<span><span class="text-zinc-500">{{ __('Prijs') }}</span> <strong>€ {{ number_format($product['price_incl'], 2, ',', '.') }}</strong></span>@endif
-                            @if (($product['price_incl_3'] ?? null) !== null)<span><span class="text-zinc-500">{{ __('BOL Koraly') }}</span> <strong>€ {{ number_format($product['price_incl_3'], 2, ',', '.') }}</strong></span>@endif
-                            @if (($product['price_incl_2'] ?? null) !== null)<span><span class="text-zinc-500">{{ __('BOL Outlet') }}</span> <strong>€ {{ number_format($product['price_incl_2'], 2, ',', '.') }}</strong></span>@endif
+                            @if (($product['price_incl'] ?? null) !== null)
+                                <span><span class="text-zinc-500">{{ __('Prijs') }}</span> <strong>€ {{ number_format($product['price_incl'], 2, ',', '.') }}</strong></span>
+                            @endif
+                            @if (($product['price_incl_3'] ?? null) !== null)
+                                <span><span class="text-zinc-500">{{ __('BOL Koraly') }}</span> <strong>€ {{ number_format($product['price_incl_3'], 2, ',', '.') }}</strong></span>
+                            @endif
+                            @if (($product['price_incl_2'] ?? null) !== null)
+                                <span><span class="text-zinc-500">{{ __('BOL Outlet') }}</span> <strong>€ {{ number_format($product['price_incl_2'], 2, ',', '.') }}</strong></span>
+                            @endif
                         </div>
                     </section>
                 @endif
 
                 <div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
-                    <table class="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-700">
+                    <table class="min-w-[860px] divide-y divide-zinc-200 text-xs sm:min-w-full sm:text-sm dark:divide-zinc-700">
                         <thead class="bg-zinc-50 dark:bg-zinc-800/60">
                             <tr>
-                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Source') }}</th>
-                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('SKU / reference') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Stock') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Difference') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Prijs') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Prijs Koraly') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Prijs Outlet') }}</th>
-                                <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Status') }}</th>
-                                <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400"><span class="sr-only">{{ __('API response') }}</span></th>
+                                <th class="px-2 py-1.5 text-left font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Bron') }}</th>
+                                <th class="px-2 py-1.5 text-left font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Barcode/Referentie') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Voorraad') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Verschil') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs Koraly') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs Outlet') }}</th>
+                                <th class="px-2 py-1.5 text-left font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Status') }}</th>
+                                <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400"><span class="sr-only">{{ __('API response') }}</span></th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
                             @foreach ($check['results'] as $result)
                                 <tr class="{{ $result['is_master'] ? 'bg-zinc-50 dark:bg-zinc-800/40' : '' }}">
-                                    <td class="px-4 py-2">
-                                        <div class="font-medium text-zinc-900 dark:text-zinc-100">
+                                    <td class="max-w-28 px-2 py-1.5 sm:max-w-none sm:px-4 sm:py-2">
+                                        <div class="truncate font-medium text-zinc-900 dark:text-zinc-100">
                                             @if (filled($result['metadata']['product_url'] ?? null))
                                                 <a href="{{ $result['metadata']['product_url'] }}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline dark:text-indigo-400">
                                                     {{ $result['source_label'] }} <span aria-hidden="true">↗</span>
@@ -123,29 +160,29 @@
                                                 <x-badge text="{{ __('master') }}" color="indigo" sm />
                                             @endif
                                         </div>
-                                        <div class="text-xs text-zinc-500">{{ $result['group'] }}</div>
+                                        <div class="hidden text-xs text-zinc-500 sm:block">{{ $result['group'] }}</div>
                                     </td>
-                                    <td class="px-4 py-2 text-zinc-600 dark:text-zinc-300">
-                                        <div>{{ $result['sku'] ?? '—' }}</div>
-                                        @if ($result['group'] === 'WooCommerce')
-                                            <div class="mt-0.5 text-xs text-zinc-500">
-                                                {{ __('EAN') }}{{ filled($result['metadata']['ean_field'] ?? null) ? ' ('.$result['metadata']['ean_field'].')' : '' }}: {{ $result['metadata']['ean'] ?? '—' }}
-                                            </div>
+                                    <td class="px-2 py-1.5 text-zinc-600 sm:px-4 sm:py-2 dark:text-zinc-300">
+                                        @if ($result['group'] === 'Bol.com')
+                                            <div><span class="text-zinc-500">{{ __('EAN') }}:</span> {{ $result['metadata']['ean'] ?? '—' }}</div>
+                                        @else
+                                            <div><span class="text-zinc-500">{{ __('Barcode') }}:</span> {{ $result['metadata']['ean'] ?? $result['metadata']['barcode'] ?? $check['ean'] }}</div>
+                                            <div class="mt-0.5"><span class="text-zinc-500">{{ __('Referentie') }}:</span> {{ $result['sku'] ?? '—' }}</div>
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2 text-right font-mono">
+                                    <td class="px-2 py-1.5 text-right font-mono sm:px-4 sm:py-2 {{ ! $result['is_master'] && $result['found'] && (float) ($result['diff'] ?? 0) !== 0.0 ? 'text-red-600 dark:text-red-400' : '' }}">
                                         {{ $result['found'] ? rtrim(rtrim(number_format($result['stock'], 2, '.', ''), '0'), '.') : '—' }}
                                     </td>
-                                    <td class="px-4 py-2 text-right font-mono">
+                                    <td class="px-2 py-1.5 text-right font-mono sm:px-4 sm:py-2">
                                         @if ($result['diff'] !== null)
-                                            <span class="{{ (float) $result['diff'] === 0.0 ? 'text-zinc-500' : ((float) $result['diff'] < 0 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400') }}">
+                                            <span class="{{ (float) $result['diff'] === 0.0 ? 'text-zinc-500' : 'text-red-600 dark:text-red-400' }}">
                                                 {{ (float) $result['diff'] > 0 ? '+' : '' }}{{ rtrim(rtrim(number_format($result['diff'], 2, '.', ''), '0'), '.') }}
                                             </span>
                                         @else
                                             —
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2 text-right font-mono">
+                                    <td class="px-2 py-1.5 text-right font-mono sm:px-4 sm:py-2">
                                         @if ($result['is_master'] && ($result['metadata']['price_incl'] ?? null) !== null)
                                             € {{ number_format($result['metadata']['price_incl'], 2, ',', '.') }}
                                         @elseif ($result['source_key'] === 'dekookwinkel' && $result['price'] !== null)
@@ -154,7 +191,7 @@
                                             —
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2 text-right font-mono">
+                                    <td class="px-2 py-1.5 text-right font-mono sm:px-4 sm:py-2">
                                         @if ($result['is_master'] && ($result['metadata']['price_incl_3'] ?? null) !== null)
                                             € {{ number_format($result['metadata']['price_incl_3'], 2, ',', '.') }}
                                         @elseif (($result['source_key'] === 'koraly' || ($result['metadata']['shop'] ?? null) === 'koraly') && $result['price'] !== null)
@@ -163,7 +200,7 @@
                                             —
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2 text-right font-mono">
+                                    <td class="px-2 py-1.5 text-right font-mono sm:px-4 sm:py-2">
                                         @if ($result['is_master'] && ($result['metadata']['price_incl_2'] ?? null) !== null)
                                             € {{ number_format($result['metadata']['price_incl_2'], 2, ',', '.') }}
                                         @elseif (($result['source_key'] === 'outlet_elektro' || ($result['metadata']['shop'] ?? null) === 'outlet_elektro') && $result['price'] !== null)
@@ -172,7 +209,7 @@
                                             —
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2">
+                                    <td class="px-2 py-1.5 sm:px-4 sm:py-2">
                                         @if ($result['error'])
                                             <x-badge text="{{ __('error') }}" color="red" sm />
                                         @elseif (! $result['found'])
@@ -189,9 +226,9 @@
                                             <div class="mt-1 text-xs text-red-500">{{ $result['error'] }}</div>
                                         @endif
                                     </td>
-                                    <td class="px-4 py-2 text-right">
+                                    <td class="px-2 py-1.5 text-right sm:px-4 sm:py-2">
                                         @if ($result['found'] && is_array($result['metadata']['api_response'] ?? null))
-                                            <flux:button size="sm" variant="primary" wire:click="openApiResponse('{{ $result['source_key'] }}')">
+                                            <flux:button size="sm" variant="filled" wire:click="openApiResponse('{{ $result['source_key'] }}')">
                                                 {{ __('API JSON') }}
                                             </flux:button>
                                         @endif
@@ -202,7 +239,14 @@
                     </table>
                 </div>
             </x-card>
+            </div>
         @endif
+
+        <div wire:loading wire:target="lookup">
+            <x-card>
+                <flux:text>{{ __('Looking up product…') }}</flux:text>
+            </x-card>
+        </div>
 
         <flux:modal
             name="api-response"

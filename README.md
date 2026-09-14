@@ -8,7 +8,7 @@ The monitor deliberately never changes stock in an external system.
 
 ## Current scope
 
-- Look up one EAN at `/stock/lookup`.
+- Look up one product by ERP reference or barcode at `/stock/lookup`.
 - Run a queued comparison of a pasted list or all EANs from Onlinefact at
   `/stock/batch`.
 - Show matching, missing, failing and discrepant sources separately.

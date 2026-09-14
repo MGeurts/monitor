@@ -12,7 +12,7 @@ use Livewire\Attributes\Url;
 use Livewire\Component;
 use Livewire\WithPagination;
 
-#[Title('Batch stock comparison')]
+#[Title('Batch opzoeken')]
 class BatchRunPage extends Component
 {
     use WithPagination;

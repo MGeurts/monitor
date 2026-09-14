@@ -19,10 +19,10 @@
 
                 <flux:sidebar.group :heading="__('Stock monitor')" class="grid">
                     <flux:sidebar.item icon="magnifying-glass" :href="route('stock.lookup')" :current="request()->routeIs('stock.lookup')" wire:navigate>
-                        {{ __('EAN lookup') }}
+                        {{ __('Product lookup') }}
                     </flux:sidebar.item>
                     <flux:sidebar.item icon="queue-list" :href="route('stock.batch')" :current="request()->routeIs('stock.batch')" wire:navigate>
-                        {{ __('Batch comparison') }}
+                        {{ __('Batch lookup') }}
                     </flux:sidebar.item>
                 </flux:sidebar.group>
             </flux:sidebar.nav>
