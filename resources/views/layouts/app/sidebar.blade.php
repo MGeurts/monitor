@@ -15,9 +15,14 @@
                     <flux:sidebar.item icon="home" :href="route('dashboard')" :current="request()->routeIs('dashboard')" wire:navigate>
                         {{ __('Dashboard') }}
                     </flux:sidebar.item>
+                </flux:sidebar.group>
 
-                    <flux:sidebar.item icon="archive-box" :href="route('stock-lookup')" :current="request()->routeIs('stock-lookup')" wire:navigate>
-                        {{ __('Stock lookup') }}
+                <flux:sidebar.group :heading="__('Stock monitor')" class="grid">
+                    <flux:sidebar.item icon="magnifying-glass" :href="route('stock.lookup')" :current="request()->routeIs('stock.lookup')" wire:navigate>
+                        {{ __('EAN lookup') }}
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="queue-list" :href="route('stock.batch')" :current="request()->routeIs('stock.batch')" wire:navigate>
+                        {{ __('Batch comparison') }}
                     </flux:sidebar.item>
                 </flux:sidebar.group>
             </flux:sidebar.nav>
