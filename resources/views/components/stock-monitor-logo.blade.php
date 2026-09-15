@@ -1,0 +1,7 @@
+<svg {{ $attributes->merge(['viewBox' => '0 0 128 128', 'fill' => 'none', 'xmlns' => 'http://www.w3.org/2000/svg']) }} aria-label="Stock Monitor">
+    <rect width="128" height="128" rx="28" fill="#16233B"/>
+    <path d="M20 64C31 44 46 34 64 34C82 34 97 44 108 64C97 84 82 94 64 94C46 94 31 84 20 64Z" stroke="#F8FAFC" stroke-width="8" stroke-linejoin="round"/>
+    <circle cx="64" cy="64" r="16" fill="#24C5B5"/>
+    <path d="M55 64H73M64 55V73" stroke="#16233B" stroke-width="5" stroke-linecap="round"/>
+    <path d="M31 29V42M40 25V38M49 22V35" stroke="#24C5B5" stroke-width="5" stroke-linecap="round"/>
+</svg>
