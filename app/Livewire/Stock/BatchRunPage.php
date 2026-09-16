@@ -83,6 +83,9 @@ class BatchRunPage extends Component
         return $this->batchRunId ? BatchRun::find($this->batchRunId) : null;
     }
 
+    /**
+     * @return Collection<int, BatchRun>
+     */
     #[Computed]
     public function recentRuns(): Collection
     {

@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class BatchRunItem extends Model
 {
+    /** @use HasFactory<\Database\Factories\BatchRunItemFactory> */
     use HasFactory;
 
     protected $fillable = [
@@ -33,6 +34,9 @@ class BatchRunItem extends Model
         ];
     }
 
+    /**
+     * @return BelongsTo<BatchRun, $this>
+     */
     public function batchRun(): BelongsTo
     {
         return $this->belongsTo(BatchRun::class);

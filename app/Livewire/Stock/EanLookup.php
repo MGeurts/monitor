@@ -4,6 +4,7 @@ namespace App\Livewire\Stock;
 
 use App\Services\Stock\SourceRegistry;
 use App\Services\Stock\StockAggregatorService;
+use Illuminate\Contracts\View\View;
 use Livewire\Attributes\Title;
 use Livewire\Component;
 
@@ -81,7 +82,7 @@ class EanLookup extends Component
         $this->searching = false;
     }
 
-    public function render(SourceRegistry $sources)
+    public function render(SourceRegistry $sources): View
     {
         return view('livewire.stock.ean-lookup', [
             'sourceMeta' => $sources->meta(),

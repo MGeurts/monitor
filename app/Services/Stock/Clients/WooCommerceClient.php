@@ -18,7 +18,7 @@ use Throwable;
  *
  * @see https://woocommerce.com/document/woocommerce-rest-api/
  */
-class WooCommerceClient implements StockSourceClient
+final class WooCommerceClient implements StockSourceClient
 {
     protected bool $hadSuccessfulLookup = false;
 

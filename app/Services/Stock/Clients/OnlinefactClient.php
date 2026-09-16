@@ -12,7 +12,7 @@ use Throwable;
  *
  * @see https://api.onlinefact.be — GET /products.php?barcode=EAN
  */
-class OnlinefactClient implements StockSourceClient
+final class OnlinefactClient implements StockSourceClient
 {
     public function __construct(
         protected string $key,

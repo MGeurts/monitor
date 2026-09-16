@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class BatchRun extends Model
 {
+    /** @use HasFactory<\Database\Factories\BatchRunFactory> */
     use HasFactory;
 
     protected $fillable = [
@@ -31,11 +32,17 @@ class BatchRun extends Model
         ];
     }
 
+    /**
+     * @return BelongsTo<User, $this>
+     */
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
+    /**
+     * @return HasMany<BatchRunItem, $this>
+     */
     public function items(): HasMany
     {
         return $this->hasMany(BatchRunItem::class);
