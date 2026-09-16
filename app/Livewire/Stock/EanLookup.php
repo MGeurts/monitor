@@ -12,6 +12,9 @@ class EanLookup extends Component
 {
     public string $ean = '';
 
+    /**
+     * @var array{ean: string, master_source: string, master_stock: float|null, results: array<int, array<string, mixed>>}|null
+     */
     public ?array $check = null;
 
     public bool $searching = false;

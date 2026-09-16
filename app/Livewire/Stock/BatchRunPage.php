@@ -6,6 +6,8 @@ use App\Jobs\SeedBatchRunFromErpJob;
 use App\Models\BatchRun;
 use App\Services\Stock\BatchRunSeeder;
 use App\Services\Stock\SourceRegistry;
+use Illuminate\Contracts\View\View;
+use Illuminate\Database\Eloquent\Collection;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Attributes\Url;
@@ -53,11 +55,14 @@ class BatchRunPage extends Component
             'pastedEans' => ['required', 'string'],
         ]);
 
-        $eans = collect(preg_split('/[\s,;]+/', $this->pastedEans))
-            ->map(fn ($ean) => trim($ean))
-            ->filter()
-            ->values()
-            ->all();
+        $pieces = preg_split('/[\s,;]+/', $this->pastedEans) ?: [];
+
+        $eans = array_values(
+            collect($pieces)
+                ->map(fn (string $ean): string => trim($ean))
+                ->filter()
+                ->all()
+        );
 
         $batchRun = BatchRun::create([
             'user_id' => auth()->id(),
@@ -79,7 +84,7 @@ class BatchRunPage extends Component
     }
 
     #[Computed]
-    public function recentRuns()
+    public function recentRuns(): Collection
     {
         return BatchRun::query()->latest()->limit(10)->get();
     }
@@ -87,15 +92,15 @@ class BatchRunPage extends Component
     #[Computed]
     public function isLive(): bool
     {
-        return $this->batchRun && in_array($this->batchRun->status, ['pending', 'running'], true);
+        return $this->batchRun() && in_array($this->batchRun()->status, ['pending', 'running'], true);
     }
 
-    public function render(SourceRegistry $sources)
+    public function render(SourceRegistry $sources): View
     {
         $items = null;
 
-        if ($this->batchRun) {
-            $items = $this->batchRun->items()
+        if ($this->batchRun()) {
+            $items = $this->batchRun()->items()
                 ->when($this->filter === 'mismatches', fn ($q) => $q->where('has_mismatch', true))
                 ->when($this->filter === 'errors', fn ($q) => $q->where('has_error', true))
                 ->when($this->filter === 'pending', fn ($q) => $q->where('status', 'pending'))
