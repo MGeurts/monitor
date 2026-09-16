@@ -21,8 +21,8 @@ class StockAggregatorService
      * @return array{
      *     ean: string,
      *     master_source: string,
-     *     master: ?StockResult,
-     *     results: Collection<int, array>,
+     *     master_stock: float|null,
+     *     results: Collection<int, array<string, mixed>>,
      * }
      */
     public function check(string $ean): array
