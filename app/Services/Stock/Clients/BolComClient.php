@@ -36,7 +36,7 @@ final class BolComClient implements StockSourceClient
 
     public static function make(string $key, array $config): static
     {
-        return new static(
+        return new self(
             key: $key,
             label: $config['label'] ?? $key,
             group: $config['group'] ?? 'Bol.com',

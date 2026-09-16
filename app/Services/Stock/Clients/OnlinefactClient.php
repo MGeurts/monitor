@@ -24,7 +24,7 @@ final class OnlinefactClient implements StockSourceClient
 
     public static function make(string $key, array $config): static
     {
-        return new static(
+        return new self(
             key: $key,
             label: $config['label'] ?? $key,
             baseUrl: rtrim($config['base_url'] ?? 'https://api.onlinefact.be', '/'),
