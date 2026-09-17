@@ -18,7 +18,7 @@ use Throwable;
  *
  * @see https://woocommerce.com/document/woocommerce-rest-api/
  */
-class WooCommerceClient implements StockSourceClient
+final class WooCommerceClient implements StockSourceClient
 {
     protected bool $hadSuccessfulLookup = false;
 
@@ -37,7 +37,7 @@ class WooCommerceClient implements StockSourceClient
 
     public static function make(string $key, array $config): static
     {
-        return new static(
+        return new self(
             key: $key,
             label: $config['label'] ?? $key,
             group: $config['group'] ?? 'WooCommerce',

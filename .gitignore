@@ -22,5 +22,3 @@ yarn-error.log
 /.vscode
 /.zed
 deploy-monitor.sh
-deploy-monitor.sh.bak-*
-monitor-public-build.tar.gz

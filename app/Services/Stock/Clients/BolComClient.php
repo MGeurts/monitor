@@ -19,7 +19,7 @@ use Throwable;
  *
  * @see https://api.bol.com/retailer/public/Retailer-API/v11/functional/offer-api
  */
-class BolComClient implements StockSourceClient
+final class BolComClient implements StockSourceClient
 {
     public function __construct(
         protected string $key,
@@ -36,7 +36,7 @@ class BolComClient implements StockSourceClient
 
     public static function make(string $key, array $config): static
     {
-        return new static(
+        return new self(
             key: $key,
             label: $config['label'] ?? $key,
             group: $config['group'] ?? 'Bol.com',
@@ -259,9 +259,17 @@ class BolComClient implements StockSourceClient
      */
     private function offersForEan(array $offers, string $ean): array
     {
-        return collect($offers)
-            ->filter(fn (mixed $offer): bool => is_array($offer) && (string) ($offer['ean'] ?? '') === $ean)
-            ->values()
-            ->all();
+        $matches = [];
+
+        foreach ($offers as $offer) {
+            if (! is_array($offer) || (string) ($offer['ean'] ?? '') !== $ean) {
+                continue;
+            }
+
+            /** @var array<string, mixed> $offer */
+            $matches[] = $offer;
+        }
+
+        return $matches;
     }
 }
