@@ -31,7 +31,7 @@
 
                 <div class="mt-4 space-y-4">
                     <div>
-                        <flux:text class="mb-2 font-medium">{{ __('All products from the ERP') }}</flux:text>
+                        <flux:text class="mb-2 font-medium">{{ __('All products from Onlinefact') }}</flux:text>
                         <flux:text class="mb-2 text-xs">{{ __('Pulls every EAN known to Onlinefact and checks it against every source.') }}</flux:text>
                         <x-button wire:click="startFromErp" loading="startFromErp" primary block>
                             {{ __('Launch full comparison') }}
@@ -102,7 +102,7 @@
                                     <tr>
                                         <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('EAN') }}</th>
                                         <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Description') }}</th>
-                                        <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('ERP stock') }}</th>
+                                        <th class="px-4 py-2 text-right font-medium text-zinc-500 dark:text-zinc-400">{{ __('Onlinefact stock') }}</th>
                                         <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Per source') }}</th>
                                         <th class="px-4 py-2 text-left font-medium text-zinc-500 dark:text-zinc-400">{{ __('Status') }}</th>
                                     </tr>

@@ -45,8 +45,8 @@ return [
     'sources' => [
 
         'onlinefact' => [
-            'label' => 'Onlinefact (ERP)',
-            'group' => 'ERP',
+            'label' => 'Onlinefact',
+            'group' => 'Onlinefact',
             'type' => 'erp',
             'driver' => OnlinefactClient::class,
             'base_url' => env('ONLINEFACT_API_URL', 'https://api.onlinefact.be'),

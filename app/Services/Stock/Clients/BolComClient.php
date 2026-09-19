@@ -108,6 +108,7 @@ final class BolComClient implements StockSourceClient
                 metadata: [
                     'shop' => $this->shop,
                     'ean' => $ean,
+                    'published' => $this->isPublished($offers),
                     'api_response' => [...$body, 'offers' => $offers],
                 ],
             );
@@ -140,7 +141,7 @@ final class BolComClient implements StockSourceClient
         return Cache::get("bol-token:{$this->key}");
     }
 
-    /** @return array{published: int, total: int} */
+    /** @return array{published: int, total: int, name: ?string, retailer_id: ?string} */
     public function offerCounts(): array
     {
         if (blank($this->clientId) || blank($this->clientSecret)) {
@@ -153,9 +154,14 @@ final class BolComClient implements StockSourceClient
             throw new RuntimeException('Could not authenticate with Bol.com.');
         }
 
+        $offers = $this->allOffers($token);
+        $retailer = $this->retailerInformation($token);
+
         return [
-            'published' => $this->countOffers($token, $this->country),
-            'total' => $this->countOffers($token),
+            'published' => $this->countPublishedOffers($offers),
+            'total' => count($offers),
+            'name' => $retailer['displayName'] ?? $retailer['companyName'] ?? null,
+            'retailer_id' => $this->storeRetailerId($retailer),
         ];
     }
 
@@ -199,6 +205,33 @@ final class BolComClient implements StockSourceClient
         ];
     }
 
+    public function cachedRetailerId(): ?string
+    {
+        $retailerId = Cache::get("bol-retailer-id:{$this->key}");
+
+        return filled($retailerId) ? (string) $retailerId : null;
+    }
+
+    /** @return list<mixed> */
+    public function addRetailerInformationPoolRequest(Pool $pool, string $token): array
+    {
+        return [
+            $pool->as("bol-retailer:{$this->key}")->withToken($token)->withHeaders(['Accept' => $this->accept])
+                ->timeout(15)->get("{$this->apiUrl}/retailers/current"),
+        ];
+    }
+
+    public function storeRetailerInformationResponse(Response|Throwable|null $response): ?string
+    {
+        if (! $response instanceof Response || ! $response->successful()) {
+            return null;
+        }
+
+        $retailer = $response->json();
+
+        return is_array($retailer) ? $this->storeRetailerId($retailer) : null;
+    }
+
     public function authenticationFailedResult(): StockResult
     {
         return StockResult::failed($this->key, $this->label, $this->group, 'Could not authenticate with Bol.com.', $this->country);
@@ -221,7 +254,7 @@ final class BolComClient implements StockSourceClient
         return filled($ean) ? trim((string) $ean) : $fallbackEan;
     }
 
-    public function resultFromOfferPool(Response|Throwable|null $response, float $started, string $ean): StockResult
+    public function resultFromOfferPool(Response|Throwable|null $response, float $started, string $ean, ?string $retailerId = null): StockResult
     {
         if (blank($this->clientId) || blank($this->clientSecret)) {
             return StockResult::failed($this->key, $this->label, $this->group, 'Missing Bol.com API credentials.', $this->country);
@@ -265,6 +298,8 @@ final class BolComClient implements StockSourceClient
             metadata: [
                 'shop' => $this->shop,
                 'ean' => $ean,
+                'retailer_id' => $retailerId ?? $this->cachedRetailerId(),
+                'published' => $this->isPublished($offers),
                 'api_response' => [...$body, 'offers' => $offers],
             ],
         );
@@ -293,17 +328,36 @@ final class BolComClient implements StockSourceClient
         return $matches;
     }
 
-    private function countOffers(string $token, ?string $forSale = null): int
+    /** @param list<array<string, mixed>> $offers */
+    private function isPublished(array $offers): bool
     {
-        $count = 0;
+        foreach ($offers as $offer) {
+            $availabilities = $offer['countryAvailabilities'] ?? [];
+
+            if (! is_array($availabilities)) {
+                continue;
+            }
+
+            foreach ($availabilities as $availability) {
+                if (is_array($availability)
+                    && ($availability['countryCode'] ?? null) === $this->country
+                    && ($availability['forSale'] ?? false) === true) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function allOffers(string $token): array
+    {
+        $allOffers = [];
         $cursor = null;
 
         do {
             $query = ['page-size' => 100];
-
-            if ($forSale) {
-                $query['for-sale'] = $forSale;
-            }
 
             if ($cursor) {
                 $query['cursor'] = $cursor;
@@ -317,7 +371,13 @@ final class BolComClient implements StockSourceClient
             }
 
             $offers = $response->json('offers', []);
-            $count += is_array($offers) ? count($offers) : 0;
+
+            foreach (is_array($offers) ? $offers : [] as $offer) {
+                if (is_array($offer)) {
+                    $allOffers[] = $offer;
+                }
+            }
+
             $nextCursor = $response->json('page.nextCursor');
 
             if (! is_string($nextCursor) || $nextCursor === '' || $nextCursor === $cursor) {
@@ -327,6 +387,57 @@ final class BolComClient implements StockSourceClient
             $cursor = $nextCursor;
         } while (true);
 
-        return $count;
+        return $allOffers;
+    }
+
+    /** @param list<array<string, mixed>> $offers */
+    private function countPublishedOffers(array $offers): int
+    {
+        return count(array_filter($offers, function (array $offer): bool {
+            $availabilities = $offer['countryAvailabilities'] ?? [];
+
+            if (! is_array($availabilities)) {
+                return false;
+            }
+
+            foreach ($availabilities as $availability) {
+                if (is_array($availability)
+                    && ($availability['countryCode'] ?? null) === $this->country
+                    && ($availability['forSale'] ?? false) === true) {
+                    return true;
+                }
+            }
+
+            return false;
+        }));
+    }
+
+    /** @return array<string, mixed> */
+    private function retailerInformation(string $token): array
+    {
+        $response = Http::withToken($token)->withHeaders(['Accept' => $this->accept])
+            ->timeout(15)->get("{$this->apiUrl}/retailers/current");
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        $retailer = $response->json();
+
+        return is_array($retailer) ? $retailer : [];
+    }
+
+    /** @param array<string, mixed> $retailer */
+    private function storeRetailerId(array $retailer): ?string
+    {
+        $retailerId = isset($retailer['retailerId']) ? trim((string) $retailer['retailerId']) : '';
+
+        if ($retailerId !== '') {
+            Cache::put("bol-retailer-id:{$this->key}", $retailerId, now()->addDay());
+
+            return $retailerId;
+        }
+
+        return null;
     }
 }

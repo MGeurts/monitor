@@ -38,7 +38,7 @@ final class OnlinefactClient implements StockSourceClient
         $started = microtime(true);
 
         if (blank($this->apiKey) || blank($this->apiSecret)) {
-            return StockResult::failed($this->key, $this->label, 'ERP', 'Missing Onlinefact API credentials.');
+            return StockResult::failed($this->key, $this->label, 'Onlinefact', 'Missing Onlinefact API credentials.');
         }
 
         try {
@@ -52,7 +52,7 @@ final class OnlinefactClient implements StockSourceClient
                 ]);
 
             if (! $response->successful()) {
-                return StockResult::failed($this->key, $this->label, 'ERP', "HTTP {$response->status()}");
+                return StockResult::failed($this->key, $this->label, 'Onlinefact', "HTTP {$response->status()}");
             }
 
             $body = $response->json();
@@ -79,63 +79,133 @@ final class OnlinefactClient implements StockSourceClient
             }
 
             if (empty($results)) {
-                return StockResult::notFound($this->key, $this->label, 'ERP');
+                return StockResult::notFound($this->key, $this->label, 'Onlinefact');
             }
 
-            $product = $results[0];
-            $details = $this->getProductDetails($product['product_id'] ?? null);
-            $product = array_replace($product, $details);
-            $tookMs = round((microtime(true) - $started) * 1000, 1);
-
-            return new StockResult(
-                sourceKey: $this->key,
-                sourceLabel: $this->label,
-                group: 'ERP',
-                found: true,
-                description: $product['description'] ?? null,
-                sku: $product['reference'] ?? null,
-                stock: isset($product['stock']) ? (float) $product['stock'] : null,
-                price: isset($product['price_excl']) ? (float) $product['price_excl'] : (isset($product['pricenetto']) ? (float) $product['pricenetto'] : null),
-                tookMs: $tookMs,
-                metadata: [
-                    'product_id' => $product['product_id'] ?? null,
-                    'barcode' => $product['barcode'] ?? null,
-                    'unit' => $product['unit'] ?? null,
-                    'tax' => isset($product['tax']) ? (float) $product['tax'] : null,
-                    'price_excl' => isset($product['price_excl']) ? (float) $product['price_excl'] : null,
-                    'price_incl' => isset($product['price_incl']) ? (float) $product['price_incl'] : null,
-                    'purchaseprice_excl' => isset($product['purchaseprice_excl']) ? (float) $product['purchaseprice_excl'] : null,
-                    'costprice_excl' => isset($product['costprice_excl']) ? (float) $product['costprice_excl'] : null,
-                    'stock_minimum' => isset($product['stock_minimum']) ? (float) $product['stock_minimum'] : null,
-                    'category_id' => $product['categorie_id'] ?? null,
-                    'supplier' => $product['supplier'] ?? null,
-                    'location' => $product['binloc'] ?? null,
-                    'alternative_location' => $product['binloc2'] ?? null,
-                    'webshop' => array_key_exists('webshop', $product) ? (bool) $product['webshop'] : null,
-                    'managed_stock' => array_key_exists('managestock', $product) ? (bool) $product['managestock'] : null,
-                    'modified_at' => $product['datemodified'] ?? null,
-                    'ean_outlet' => $this->findProductValue($product, [
-                        'ean outlet', 'outlet ean', 'barcode outlet', 'outlet barcode',
-                    ]),
-                    'ean_koraly' => $this->findProductValue($product, [
-                        'ean koraly', 'koraly ean', 'barcode koraly', 'koraly barcode',
-                    ]),
-                    'price_incl_2' => $this->findProductValue($product, [
-                        'price incl 2', 'bol outlet', 'price bol outlet', 'bol outlet price', 'prijs bol outlet',
-                    ]),
-                    'price_incl_3' => $this->findProductValue($product, [
-                        'price incl 3', 'bol koraly', 'price bol koraly', 'bol koraly price', 'prijs bol koraly',
-                    ]),
-                    'api_response' => [
-                        'lookup_method' => $lookupMethod,
-                        'barcode_lookup' => $body,
-                        'product_details' => $details,
-                    ],
-                ],
-            );
+            return $this->stockResultForProduct($results[0], $lookupMethod, $body, $started);
         } catch (Throwable $e) {
-            return StockResult::failed($this->key, $this->label, 'ERP', $e->getMessage());
+            return StockResult::failed($this->key, $this->label, 'Onlinefact', $e->getMessage());
         }
+    }
+
+    /**
+     * Return all ERP products that match an entered barcode. A reference is
+     * only queried when no barcode matches, because reference is unique.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function findProducts(string $value): array
+    {
+        if (blank($this->apiKey) || blank($this->apiSecret)) {
+            return [];
+        }
+
+        try {
+            $response = Http::withBasicAuth($this->apiKey, $this->apiSecret)
+                ->timeout(15)
+                ->get("{$this->baseUrl}/products.php", [
+                    'barcode' => $value,
+                    'fields' => 'product_id,reference,barcode,description,pricenetto,stock,categorie_id',
+                ]);
+
+            if (! $response->successful()) {
+                return [];
+            }
+
+            $products = $response->json('results', []);
+
+            if (is_array($products) && $products !== []) {
+                return array_values(array_filter($products, is_array(...)));
+            }
+
+            $response = Http::withBasicAuth($this->apiKey, $this->apiSecret)
+                ->timeout(15)
+                ->get("{$this->baseUrl}/products.php", [
+                    'reference' => $value,
+                    'fields' => 'product_id,reference,barcode,description,pricenetto,stock,categorie_id',
+                ]);
+
+            $products = $response->successful() ? $response->json('results', []) : [];
+
+            return is_array($products)
+                ? array_values(array_filter($products, is_array(...)))
+                : [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    public function getStockByProductId(int $productId): StockResult
+    {
+        if (blank($this->apiKey) || blank($this->apiSecret)) {
+            return StockResult::failed($this->key, $this->label, 'Onlinefact', 'Missing Onlinefact API credentials.');
+        }
+
+        $started = microtime(true);
+        $product = $this->getProductDetails($productId);
+
+        if ($product === []) {
+            return StockResult::notFound($this->key, $this->label, 'Onlinefact');
+        }
+
+        return $this->stockResultForProduct(
+            $product,
+            'product_id',
+            ['product_id' => $productId],
+            $started,
+            $product,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $product
+     * @param  array<string, mixed>  $lookupResponse
+     * @param  array<string, mixed>|null  $details
+     */
+    private function stockResultForProduct(array $product, string $lookupMethod, array $lookupResponse, float $started, ?array $details = null): StockResult
+    {
+        $details ??= $this->getProductDetails($product['product_id'] ?? null);
+        $product = array_replace($product, $details);
+        $tookMs = round((microtime(true) - $started) * 1000, 1);
+
+        return new StockResult(
+            sourceKey: $this->key,
+            sourceLabel: $this->label,
+            group: 'Onlinefact',
+            found: true,
+            description: $product['description'] ?? null,
+            sku: $product['reference'] ?? null,
+            stock: isset($product['stock']) ? (float) $product['stock'] : null,
+            price: isset($product['price_excl']) ? (float) $product['price_excl'] : (isset($product['pricenetto']) ? (float) $product['pricenetto'] : null),
+            tookMs: $tookMs,
+            metadata: [
+                'product_id' => $product['product_id'] ?? null,
+                'barcode' => $product['barcode'] ?? null,
+                'unit' => $product['unit'] ?? null,
+                'tax' => isset($product['tax']) ? (float) $product['tax'] : null,
+                'price_excl' => isset($product['price_excl']) ? (float) $product['price_excl'] : null,
+                'price_incl' => isset($product['price_incl']) ? (float) $product['price_incl'] : null,
+                'purchaseprice_excl' => isset($product['purchaseprice_excl']) ? (float) $product['purchaseprice_excl'] : null,
+                'costprice_excl' => isset($product['costprice_excl']) ? (float) $product['costprice_excl'] : null,
+                'stock_minimum' => isset($product['stock_minimum']) ? (float) $product['stock_minimum'] : null,
+                'category_id' => $product['categorie_id'] ?? null,
+                'supplier' => $product['supplier'] ?? null,
+                'location' => $product['binloc'] ?? null,
+                'alternative_location' => $product['binloc2'] ?? null,
+                'webshop' => array_key_exists('webshop', $product) ? (bool) $product['webshop'] : null,
+                'managed_stock' => array_key_exists('managestock', $product) ? (bool) $product['managestock'] : null,
+                'modified_at' => $product['datemodified'] ?? null,
+                'ean_outlet' => $this->findProductValue($product, ['ean outlet', 'outlet ean', 'barcode outlet', 'outlet barcode']),
+                'ean_koraly' => $this->findProductValue($product, ['ean koraly', 'koraly ean', 'barcode koraly', 'koraly barcode']),
+                'price_incl_2' => $this->findProductValue($product, ['price incl 2', 'bol outlet', 'price bol outlet', 'bol outlet price', 'prijs bol outlet']),
+                'price_incl_3' => $this->findProductValue($product, ['price incl 3', 'bol koraly', 'price bol koraly', 'bol koraly price', 'prijs bol koraly']),
+                'api_response' => [
+                    'lookup_method' => $lookupMethod,
+                    'barcode_lookup' => $lookupResponse,
+                    'product_details' => $details,
+                ],
+            ],
+        );
     }
 
     /**

@@ -3,7 +3,10 @@
         <div class="grid auto-rows-min gap-4 sm:grid-cols-2 xl:grid-cols-4">
             @foreach ($bolSummaries as $summary)
                 <section class="relative aspect-video overflow-hidden rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-900">
-                    <p class="text-sm font-medium text-neutral-600 dark:text-neutral-300">{{ $summary['label'] }}</p>
+                    <p class="text-2xl font-bold tracking-tight text-neutral-700 dark:text-neutral-100">{{ $summary['label'] }}</p>
+                    @if ($summary['account_number'])
+                        <p class="mt-2 text-lg text-neutral-500">Accountnummer <strong class="font-bold text-neutral-700 dark:text-neutral-200">{{ $summary['account_number'] }}</strong></p>
+                    @endif
 
                     @if ($summary['error'])
                         <p class="mt-5 text-sm text-amber-600 dark:text-amber-400">{{ $summary['error'] }}</p>

@@ -100,6 +100,7 @@ final class WooCommerceClient implements StockSourceClient
                     'product_url' => $this->productUrl($product),
                     'ean' => $productEan['value'] ?? null,
                     'ean_field' => $productEan['field'] ?? null,
+                    'published' => ($product['status'] ?? null) === 'publish',
                     'api_response' => $product,
                 ],
             );
@@ -216,6 +217,7 @@ final class WooCommerceClient implements StockSourceClient
                 'product_url' => $this->productUrl($product),
                 'ean' => $productEan['value'] ?? null,
                 'ean_field' => $productEan['field'] ?? null,
+                'published' => ($product['status'] ?? null) === 'publish',
                 'api_response' => $product,
             ],
         );
