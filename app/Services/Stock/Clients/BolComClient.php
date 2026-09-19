@@ -8,6 +8,7 @@ use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -137,6 +138,25 @@ final class BolComClient implements StockSourceClient
     public function cachedToken(): ?string
     {
         return Cache::get("bol-token:{$this->key}");
+    }
+
+    /** @return array{published: int, total: int} */
+    public function offerCounts(): array
+    {
+        if (blank($this->clientId) || blank($this->clientSecret)) {
+            throw new RuntimeException('Missing Bol.com API credentials.');
+        }
+
+        $token = $this->token();
+
+        if (! $token) {
+            throw new RuntimeException('Could not authenticate with Bol.com.');
+        }
+
+        return [
+            'published' => $this->countOffers($token, $this->country),
+            'total' => $this->countOffers($token),
+        ];
     }
 
     /** @return list<mixed> */
@@ -271,5 +291,42 @@ final class BolComClient implements StockSourceClient
         }
 
         return $matches;
+    }
+
+    private function countOffers(string $token, ?string $forSale = null): int
+    {
+        $count = 0;
+        $cursor = null;
+
+        do {
+            $query = ['page-size' => 100];
+
+            if ($forSale) {
+                $query['for-sale'] = $forSale;
+            }
+
+            if ($cursor) {
+                $query['cursor'] = $cursor;
+            }
+
+            $response = Http::withToken($token)->withHeaders(['Accept' => $this->accept])
+                ->timeout(30)->get("{$this->apiUrl}/offers", $query);
+
+            if (! $response->successful()) {
+                throw new RuntimeException("Bol.com offers request failed with HTTP {$response->status()}.");
+            }
+
+            $offers = $response->json('offers', []);
+            $count += is_array($offers) ? count($offers) : 0;
+            $nextCursor = $response->json('page.nextCursor');
+
+            if (! is_string($nextCursor) || $nextCursor === '' || $nextCursor === $cursor) {
+                break;
+            }
+
+            $cursor = $nextCursor;
+        } while (true);
+
+        return $count;
     }
 }

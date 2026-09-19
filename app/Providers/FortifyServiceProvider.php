@@ -6,8 +6,11 @@ use App\Actions\Fortify\ResetUserPassword;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Illuminate\Auth\Events\Login;
 use Laravel\Fortify\Fortify;
 
 class FortifyServiceProvider extends ServiceProvider
@@ -28,6 +31,7 @@ class FortifyServiceProvider extends ServiceProvider
         $this->configureActions();
         $this->configureViews();
         $this->configureRateLimiting();
+        $this->configureLoginLogging();
     }
 
     /**
@@ -72,6 +76,19 @@ class FortifyServiceProvider extends ServiceProvider
             return Limit::perMinute(10)->by(
                 ($credentialId ?: $request->session()->getId()).'|'.$request->ip(),
             );
+        });
+    }
+
+    /** Log successful authentication without recording credentials. */
+    private function configureLoginLogging(): void
+    {
+        Event::listen(Login::class, function (Login $event): void {
+            Log::info('User logged in.', [
+                'user_id' => $event->user->getAuthIdentifier(),
+                'email' => $event->user->email,
+                'ip' => request()->ip(),
+                'user_agent' => request()->userAgent(),
+            ]);
         });
     }
 }
