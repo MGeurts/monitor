@@ -103,7 +103,7 @@ it('returns not found when v11 has no offer for the EAN', function () {
     expect($client->getStock('0000000000000')->found)->toBeFalse();
 });
 
-it('counts every offers page and filters published offers by the account country', function () {
+it('counts every offers page and identifies published offers for the account country', function () {
     Http::fake(function (Request $request) {
         if (str_starts_with($request->url(), 'https://login.bol.example.test/')) {
             return Http::response(['access_token' => 'test-token', 'expires_in' => 300]);
@@ -111,16 +111,19 @@ it('counts every offers page and filters published offers by the account country
 
         parse_str(parse_url($request->url(), PHP_URL_QUERY) ?: '', $query);
 
-        if (($query['for-sale'] ?? null) === 'BE') {
-            return Http::response([
-                'offers' => [['offerId' => 'published-1'], ['offerId' => 'published-2']],
-                'page' => ['nextCursor' => null],
-            ]);
+        if (str_ends_with(parse_url($request->url(), PHP_URL_PATH) ?: '', '/retailers/current')) {
+            return Http::response(['retailerId' => '1234567', 'displayName' => 'Koraly officiële account']);
         }
 
         return ($query['cursor'] ?? null) === 'next-page'
-            ? Http::response(['offers' => [['offerId' => 'all-3']], 'page' => ['nextCursor' => null]])
-            : Http::response(['offers' => [['offerId' => 'all-1'], ['offerId' => 'all-2']], 'page' => ['nextCursor' => 'next-page']]);
+            ? Http::response(['offers' => [[
+                'offerId' => 'all-3',
+                'countryAvailabilities' => [['countryCode' => 'BE', 'forSale' => true]],
+            ]], 'page' => ['nextCursor' => null]])
+            : Http::response(['offers' => [
+                ['offerId' => 'all-1', 'countryAvailabilities' => [['countryCode' => 'BE', 'forSale' => true]]],
+                ['offerId' => 'all-2', 'countryAvailabilities' => [['countryCode' => 'BE', 'forSale' => false]]],
+            ], 'page' => ['nextCursor' => 'next-page']]);
     });
 
     $client = BolComClient::make('bol_count_test', [
@@ -130,5 +133,10 @@ it('counts every offers page and filters published offers by the account country
         'client_secret' => 'client-secret',
     ]);
 
-    expect($client->offerCounts())->toBe(['published' => 2, 'total' => 3]);
+    expect($client->offerCounts())->toBe([
+        'published' => 2,
+        'total' => 3,
+        'name' => 'Koraly officiële account',
+        'retailer_id' => '1234567',
+    ]);
 });

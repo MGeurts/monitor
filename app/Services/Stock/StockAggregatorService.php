@@ -3,6 +3,7 @@
 namespace App\Services\Stock;
 
 use App\Services\Stock\Clients\BolComClient;
+use App\Services\Stock\Clients\OnlinefactClient;
 use App\Services\Stock\Clients\WooCommerceClient;
 use App\Services\Stock\DTO\StockResult;
 use Illuminate\Http\Client\Pool;
@@ -34,6 +35,49 @@ class StockAggregatorService
         $masterClient = $clients->get($masterKey)
             ?? throw new \RuntimeException("Master source [{$masterKey}] is not configured.");
         $master = $masterClient->getStock($ean);
+
+        return $this->checkWithMaster($master, $ean);
+    }
+
+    /**
+     * Continue a lookup from a product explicitly selected from an Onlinefact
+     * barcode result. The product ID prevents a duplicate barcode from
+     * resolving to an arbitrary product.
+     *
+     * @return array{
+     *     ean: string,
+     *     master_source: string,
+     *     master_stock: float|null,
+     *     results: Collection<int, array<string, mixed>>,
+     * }
+     */
+    public function checkOnlinefactProduct(int $productId): array
+    {
+        $masterKey = $this->sources->masterKey();
+        $masterClient = $this->sources->all()->get($masterKey);
+
+        if (! $masterClient instanceof OnlinefactClient) {
+            throw new \RuntimeException('The configured master source does not support product-ID lookup.');
+        }
+
+        $master = $masterClient->getStockByProductId($productId);
+        $fallback = (string) ($master->metadata['barcode'] ?? $productId);
+
+        return $this->checkWithMaster($master, $fallback);
+    }
+
+    /**
+     * @return array{
+     *     ean: string,
+     *     master_source: string,
+     *     master_stock: float|null,
+     *     results: Collection<int, array<string, mixed>>,
+     * }
+     */
+    private function checkWithMaster(StockResult $master, string $ean): array
+    {
+        $masterKey = $this->sources->masterKey();
+        $clients = $this->sources->all();
         $reference = $master->found ? $master->sku : null;
         // A reference can be entered in the lookup field. Once ERP resolved
         // it, all downstream APIs must receive the product's actual barcode.
@@ -87,6 +131,22 @@ class StockAggregatorService
             }
 
             $offerClients = $bolClients->filter(fn (BolComClient $client, string $key) => filled($tokens->get($key)));
+            $retailerIds = $offerClients->map(fn (BolComClient $client) => $client->cachedRetailerId());
+            $retailerClients = $offerClients->filter(fn (BolComClient $client, string $key) => blank($retailerIds->get($key)));
+
+            if ($retailerClients->isNotEmpty()) {
+                $retailerResponses = Http::pool(
+                    fn (Pool $pool) => $retailerClients->flatMap(
+                        fn (BolComClient $client, string $key) => $client->addRetailerInformationPoolRequest($pool, $tokens->get($key))
+                    )->all(),
+                    concurrency: $retailerClients->count(),
+                );
+
+                $retailerClients->each(function (BolComClient $client, string $key) use ($retailerResponses, $retailerIds) {
+                    $retailerIds->put($key, $client->storeRetailerInformationResponse($retailerResponses["bol-retailer:{$key}"] ?? null));
+                });
+            }
+
             $started = microtime(true);
             $offerResponses = $offerClients->isNotEmpty()
                 ? Http::pool(
@@ -97,10 +157,10 @@ class StockAggregatorService
                 )
                 : [];
 
-            $bolClients->each(function (BolComClient $client, string $key) use ($tokens, $offerResponses, $started, $bolLookupEans, &$resultsByKey) {
+            $bolClients->each(function (BolComClient $client, string $key) use ($tokens, $offerResponses, $started, $bolLookupEans, $retailerIds, &$resultsByKey) {
                 $result = blank($tokens->get($key))
                     ? $client->authenticationFailedResult()
-                    : $client->resultFromOfferPool($offerResponses["bol-offer:{$key}"] ?? null, $started, $bolLookupEans->get($key));
+                    : $client->resultFromOfferPool($offerResponses["bol-offer:{$key}"] ?? null, $started, $bolLookupEans->get($key), $retailerIds->get($key));
 
                 $resultsByKey->put($key, $result);
             });

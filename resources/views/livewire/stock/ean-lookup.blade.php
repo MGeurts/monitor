@@ -2,7 +2,7 @@
         <div>
             <flux:heading size="xl">{{ __('Product lookup') }}</flux:heading>
             <flux:text class="mt-1">
-                {{ __('Look up a product by ERP reference or barcode and compare it across every connected source.') }}
+                {{ __('Look up a product by Onlinefact reference or barcode and compare it across every connected source.') }}
             </flux:text>
         </div>
 
@@ -23,6 +23,50 @@
                 </x-button>
             </form>
         </x-card>
+
+        @if ($candidates)
+            <x-card>
+                <div>
+                    <flux:heading size="xl" class="text-red-600 dark:text-red-400">{{ __('Multiple Onlinefact products found') }}</flux:heading>
+                    <flux:text class="mt-1">
+                        {{ __('This barcode occurs on more than one product. Select the product to check; no channel has been queried yet.') }}
+                    </flux:text>
+                </div>
+
+                <div class="mt-4 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                    <table class="min-w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-700">
+                        <thead class="bg-zinc-50 dark:bg-zinc-800/60">
+                            <tr>
+                                <th class="px-4 py-2 text-left font-medium text-zinc-500">{{ __('Reference') }}</th>
+                                <th class="px-4 py-2 text-left font-medium text-zinc-500">{{ __('Description') }}</th>
+                                <th class="px-4 py-2 text-left font-medium text-zinc-500">{{ __('Product ID') }}</th>
+                                <th class="px-4 py-2 text-right font-medium text-zinc-500">{{ __('Stock') }}</th>
+                                <th class="px-4 py-2"><span class="sr-only">{{ __('Select') }}</span></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
+                            @foreach ($candidates as $candidate)
+                                <tr>
+                                    <td class="px-4 py-3 font-medium">{{ $candidate['reference'] ?? '—' }}</td>
+                                    <td class="px-4 py-3">{{ $candidate['description'] ?? '—' }}</td>
+                                    <td class="px-4 py-3 font-mono text-zinc-600 dark:text-zinc-300">{{ $candidate['product_id'] }}</td>
+                                    <td class="px-4 py-3 text-right font-mono">{{ $candidate['stock'] === null ? '—' : rtrim(rtrim(number_format($candidate['stock'], 2, '.', ''), '0'), '.') }}</td>
+                                    <td class="px-4 py-3 text-right">
+                                        <x-button wire:click="selectProduct({{ $candidate['product_id'] }})" loading="selectProduct" primary>
+                                            {{ __('Select') }}
+                                        </x-button>
+                                    </td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+
+                <flux:text class="mt-4 text-amber-700 dark:text-amber-300">
+                    {{ __('Products with the same EAN should be avoided. Please check the affected products and adjust them in Onlinefact where necessary.') }}
+                </flux:text>
+            </x-card>
+        @endif
 
         @if ($check)
             <div wire:loading.remove wire:target="lookup">
@@ -130,7 +174,7 @@
                 @endif
 
                 <div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
-                    <table class="min-w-[860px] divide-y divide-zinc-200 text-xs sm:min-w-full sm:text-sm dark:divide-zinc-700">
+                    <table class="min-w-[960px] divide-y divide-zinc-200 text-xs sm:min-w-full sm:text-sm dark:divide-zinc-700">
                         <thead class="bg-zinc-50 dark:bg-zinc-800/60">
                             <tr>
                                 <th class="px-2 py-1.5 text-left font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Bron') }}</th>
@@ -140,6 +184,7 @@
                                 <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs') }}</th>
                                 <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs Koraly') }}</th>
                                 <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Prijs Outlet') }}</th>
+                                <th class="px-2 py-1.5 text-center font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Published') }}</th>
                                 <th class="px-2 py-1.5 text-left font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400">{{ __('Status') }}</th>
                                 <th class="px-2 py-1.5 text-right font-medium text-zinc-500 sm:px-4 sm:py-2 dark:text-zinc-400"><span class="sr-only">{{ __('API response') }}</span></th>
                             </tr>
@@ -147,10 +192,20 @@
                         <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
                             @foreach ($check['results'] as $result)
                                 <tr class="{{ $result['is_master'] ? 'bg-zinc-50 dark:bg-zinc-800/40' : '' }}">
+                                    @php
+                                        $bolEan = filled($result['metadata']['ean'] ?? null) ? trim((string) $result['metadata']['ean']) : null;
+                                        $bolSearchUrl = $result['group'] === 'Bol.com' && $result['found'] && $bolEan
+                                            ? 'https://www.bol.com/be/nl/s/?searchtext='.rawurlencode($bolEan)
+                                            : null;
+                                    @endphp
                                     <td class="max-w-28 px-2 py-1.5 sm:max-w-none sm:px-4 sm:py-2">
                                         <div class="truncate font-medium text-zinc-900 dark:text-zinc-100">
                                             @if (filled($result['metadata']['product_url'] ?? null))
                                                 <a href="{{ $result['metadata']['product_url'] }}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline dark:text-indigo-400">
+                                                    {{ $result['source_label'] }} <span aria-hidden="true">↗</span>
+                                                </a>
+                                            @elseif ($bolSearchUrl)
+                                                <a href="{{ $bolSearchUrl }}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline dark:text-indigo-400">
                                                     {{ $result['source_label'] }} <span aria-hidden="true">↗</span>
                                                 </a>
                                             @else
@@ -160,7 +215,18 @@
                                                 <x-badge text="{{ __('master') }}" color="indigo" sm />
                                             @endif
                                         </div>
-                                        <div class="hidden text-xs text-zinc-500 sm:block">{{ $result['group'] }}</div>
+                                        @if ($result['group'] === 'Bol.com')
+                                            <div class="hidden text-xs text-zinc-500 sm:block">
+                                                <strong>
+                                                    Bol.com
+                                                    @if (filled($result['metadata']['retailer_id'] ?? null))
+                                                        ({{ $result['metadata']['retailer_id'] }})
+                                                    @endif
+                                                </strong>
+                                            </div>
+                                        @else
+                                            <div class="hidden text-xs text-zinc-500 sm:block">{{ $result['group'] }}</div>
+                                        @endif
                                     </td>
                                     <td class="px-2 py-1.5 text-zinc-600 sm:px-4 sm:py-2 dark:text-zinc-300">
                                         @if ($result['group'] === 'Bol.com')
@@ -207,6 +273,15 @@
                                             <span class="{{ $priceColor($result['price'], $product['price_incl_2'] ?? null) }}">€ {{ number_format($result['price'], 2, ',', '.') }}</span>
                                         @else
                                             —
+                                        @endif
+                                    </td>
+                                    <td class="px-2 py-1.5 text-center text-lg sm:px-4 sm:py-2">
+                                        @if (! in_array($result['group'], ['Bol.com', 'WooCommerce'], true) || $result['error'])
+                                            <span class="text-zinc-400">—</span>
+                                        @elseif (($result['metadata']['published'] ?? false) === true)
+                                            <span class="font-bold text-green-600 dark:text-green-400" title="{{ __('yes') }}" aria-label="{{ __('Published') }}: {{ __('yes') }}">✓</span>
+                                        @else
+                                            <span class="font-bold text-red-600 dark:text-red-400" title="{{ __('no') }}" aria-label="{{ __('Published') }}: {{ __('no') }}">✕</span>
                                         @endif
                                     </td>
                                     <td class="px-2 py-1.5 sm:px-4 sm:py-2">

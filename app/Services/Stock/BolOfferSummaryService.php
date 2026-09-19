@@ -15,7 +15,7 @@ class BolOfferSummaryService
         'bol_outlet_elektro_nl' => 'Outlet NL',
     ];
 
-    /** @return list<array{key: string, label: string, published: ?int, total: ?int, error: ?string}> */
+    /** @return list<array{key: string, label: string, account_number: ?string, published: ?int, total: ?int, error: ?string}> */
     public function forDashboard(): array
     {
         $sources = config('monitor.sources', []);
@@ -24,22 +24,29 @@ class BolOfferSummaryService
             $config = $sources[$key] ?? [];
 
             if (blank($config['client_id'] ?? null) || blank($config['client_secret'] ?? null)) {
-                return compact('key', 'label') + ['published' => null, 'total' => null, 'error' => 'Credentials ontbreken.'];
+                return compact('key', 'label') + ['account_number' => null, 'published' => null, 'total' => null, 'error' => 'Credentials ontbreken.'];
             }
 
             try {
-                $counts = Cache::remember("dashboard:bol-offer-counts:{$key}", now()->addMinutes(15), function () use ($key, $config): array {
+                $counts = Cache::remember("dashboard:bol-offer-counts:v2:{$key}", now()->addMinutes(15), function () use ($key, $config): array {
                     /** @var BolComClient $client */
                     $client = ($config['driver'])::make($key, $config);
 
                     return $client->offerCounts();
                 });
 
-                return compact('key', 'label') + ['published' => $counts['published'], 'total' => $counts['total'], 'error' => null];
+                return [
+                    'key' => $key,
+                    'label' => $counts['name'] ?? $label,
+                    'account_number' => $counts['retailer_id'] ?? null,
+                    'published' => $counts['published'],
+                    'total' => $counts['total'],
+                    'error' => null,
+                ];
             } catch (Throwable $e) {
                 report($e);
 
-                return compact('key', 'label') + ['published' => null, 'total' => null, 'error' => 'Kon bol.com niet bereiken.'];
+                return compact('key', 'label') + ['account_number' => null, 'published' => null, 'total' => null, 'error' => 'Kon bol.com niet bereiken.'];
             }
         })->all();
     }

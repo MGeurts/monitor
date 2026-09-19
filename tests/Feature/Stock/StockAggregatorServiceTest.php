@@ -54,6 +54,7 @@ it('uses the ERP as master and calculates every channel difference against it', 
             'sku' => 'JUPILER25CL',
             'name' => 'Jupiler 25 cl',
             'stock_quantity' => 10,
+            'status' => 'publish',
         ]]);
     });
 
@@ -67,6 +68,7 @@ it('uses the ERP as master and calculates every channel difference against it', 
         ->and($results['onlinefact']['metadata']['price_incl'])->toBe(18.0)
         ->and($results['onlinefact']['metadata']['api_response']['barcode_lookup']['results'][0]['product_id'])->toBe(3)
         ->and($results['shop_be']['stock'])->toBe(10.0)
+        ->and($results['shop_be']['metadata']['published'])->toBeTrue()
         ->and($results['shop_be']['diff'])->toBe(-2.0);
 });
 
@@ -237,4 +239,45 @@ it('renders the Onlinefact product details above the source comparison', functio
         ->assertSee('CIDN68010')
         ->assertSee('CHRISTMASINSPIRATIONS BV')
         ->assertSee('Prijzen');
+});
+
+it('requires an explicit product selection when a barcode occurs more than once', function () {
+    Http::fake(function (Request $request) {
+        if (str_contains($request->url(), '/products.php')) {
+            return Http::response([
+                'results' => [
+                    ['product_id' => 3, 'reference' => 'FIRST-PRODUCT', 'barcode' => '8719505560000', 'description' => 'First product', 'stock' => '5'],
+                    ['product_id' => 4, 'reference' => 'SECOND-PRODUCT', 'barcode' => '8719505560000', 'description' => 'Second product', 'stock' => '8'],
+                ],
+            ]);
+        }
+
+        if (str_ends_with($request->url(), '/products/4')) {
+            return Http::response([
+                'product_id' => 4,
+                'reference' => 'SECOND-PRODUCT',
+                'barcode' => '8719505560000',
+                'description' => 'Second product',
+                'stock' => '8',
+            ]);
+        }
+
+        return Http::response([]);
+    });
+
+    $page = Livewire::test(EanLookup::class)
+        ->set('ean', '8719505560000')
+        ->call('lookup')
+        ->assertSee('Meerdere Onlinefact-producten gevonden')
+        ->assertSee('FIRST-PRODUCT')
+        ->assertSee('SECOND-PRODUCT')
+        ->assertSet('check', null);
+
+    Http::assertNotSent(fn (Request $request): bool => str_starts_with($request->url(), 'https://shop.example.test/'));
+
+    $page->call('selectProduct', 4)
+        ->assertSee('Second product')
+        ->assertSee('SECOND-PRODUCT');
+
+    Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/products/4'));
 });
